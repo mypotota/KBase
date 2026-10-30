@@ -16,11 +16,11 @@ test("Local Markdown files remain directly accessible and external edits are pre
       ).getDirectoryHandle("test-parent", { create: true });
   });
   await p.goto("http://127.0.0.1:4174");
-  await p.getByRole("heading", { name: "建立你的知识库。" }).waitFor();
+  await p.getByRole("heading", { name: "建立你的知识库" }).waitFor();
   await p.getByRole("button", { name: /新建知识库.*选择位置/ }).click();
   await p.getByLabel("名称", { exact: true }).fill("真实知识库");
   await p.getByRole("button", { name: "选择位置并创建", exact: true }).click();
-  await p.getByRole("heading", { name: "你的第一个项目。" }).waitFor();
+  await p.getByRole("heading", { name: "还没有项目" }).waitFor();
   console.log("root created");
   await p.getByRole("button", { name: "创建项目", exact: true }).click();
   await p.getByLabel("名称", { exact: true }).fill("Agent 项目");
@@ -95,9 +95,14 @@ test("Local Markdown files remain directly accessible and external edits are pre
   console.log("external conflict safely merged");
   await p.waitForTimeout(1200);
   console.log("disk before delete", JSON.stringify(await diskText()));
-  await p.getByRole("button", { name: "文档操作", exact: true }).click();
-  await p.getByRole("menuitem", { name: "移入回收站", exact: true }).click();
-  await p.getByRole("button", { name: "移入回收站", exact: true }).click();
+  await p
+    .locator('[data-testid="aside"]')
+    .getByRole("button", { name: "移入回收站", exact: true })
+    .click();
+  await p
+    .getByRole("dialog")
+    .getByRole("button", { name: "移入回收站", exact: true })
+    .click();
   await p.getByRole("button", { name: "更多操作", exact: true }).click();
   await p.getByRole("menuitem", { name: "回收站", exact: true }).click();
   await p.getByRole("button", { name: "恢复", exact: true }).click();
@@ -150,7 +155,7 @@ test("Local Markdown files remain directly accessible and external edits are pre
     await folder.removeEntry("本地笔记.md");
   });
   await p
-    .getByRole("heading", { name: "从第一篇文档开始。", exact: true })
+    .getByRole("heading", { name: "从第一篇文档开始", exact: true })
     .waitFor({ timeout: 8000 });
   await p.setViewportSize({ width: 390, height: 844 });
   assert.equal(

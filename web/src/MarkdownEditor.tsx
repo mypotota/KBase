@@ -3,13 +3,52 @@ import { toast } from "sonner";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
+import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
+import { createLowlight } from "lowlight";
+import bash from "highlight.js/lib/languages/bash";
+import c from "highlight.js/lib/languages/c";
+import cpp from "highlight.js/lib/languages/cpp";
+import diff from "highlight.js/lib/languages/diff";
+import ini from "highlight.js/lib/languages/ini";
+import java from "highlight.js/lib/languages/java";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import kotlin from "highlight.js/lib/languages/kotlin";
+import plaintext from "highlight.js/lib/languages/plaintext";
+import python from "highlight.js/lib/languages/python";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
 import Placeholder from "@tiptap/extension-placeholder";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { TableKit } from "@tiptap/extension-table";
 import Image from "@tiptap/extension-image";
-import { requiresSource } from "./core/markdown";
+import { requiresSource, splitFrontmatter } from "./core/markdown";
 import { Textarea } from "@/components/ui/textarea";
+
+// Curated language set — covers the common cases (Java/Kotlin/C/C++/shell for
+// Android & AOSP notes, plus web/config languages) without bundling every
+// grammar. Unregistered languages (e.g. mermaid) render as plain code.
+const lowlight = createLowlight();
+lowlight.register({
+  java,
+  kotlin,
+  c,
+  cpp,
+  bash,
+  json,
+  xml,
+  yaml,
+  javascript,
+  typescript,
+  python,
+  sql,
+  diff,
+  ini,
+  plaintext,
+});
 
 type Props = {
   value: string;
@@ -25,13 +64,22 @@ export default function MarkdownEditor(props: Props) {
     props;
   const latest = useRef({ onChange, onSlash, resolveImage, onImage });
   latest.current = { onChange, onSlash, resolveImage, onImage };
-  const source = requiresSource(value);
+  // The frontmatter block stays out of the editor entirely and is re-attached
+  // verbatim on every save; refs avoid stale closures inside editor events.
+  const frontRef = useRef("");
+  const bodyRef = useRef("");
+  const { front, body } = splitFrontmatter(value);
+  const source = requiresSource(body);
+  frontRef.current = front;
+  bodyRef.current = body;
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
         link: { openOnClick: false },
         undoRedo: { depth: 100 },
+        codeBlock: false,
       }),
+      CodeBlockLowlight.configure({ lowlight, defaultLanguage: "plaintext" }),
       Markdown,
       Placeholder.configure({ placeholder: "写下你的想法，或输入 / 插入内容" }),
       TaskList,
@@ -68,7 +116,7 @@ export default function MarkdownEditor(props: Props) {
         },
       }),
     ],
-    content: value,
+    content: body,
     contentType: "markdown",
     editable: !readOnly,
     editorProps: {
@@ -111,7 +159,8 @@ export default function MarkdownEditor(props: Props) {
       },
     },
     onUpdate({ editor }) {
-      latest.current.onChange(editor.getMarkdown());
+      bodyRef.current = editor.getMarkdown();
+      latest.current.onChange(frontRef.current + editor.getMarkdown());
     },
   });
   useEffect(() => {
@@ -122,26 +171,44 @@ export default function MarkdownEditor(props: Props) {
   useEffect(() => {
     if (!editor) return;
     editor.setEditable(!readOnly, false);
-    if (editor.getMarkdown() !== value)
-      editor.commands.setContent(value, {
+    if (editor.getMarkdown() !== body)
+      editor.commands.setContent(body, {
         contentType: "markdown",
         emitUpdate: false,
       });
-  }, [editor, value, readOnly]);
+  }, [editor, body, readOnly]);
   if (source)
     return (
       <>
-        <p className="source-notice">
+        <p className="pb-3 text-sm text-muted-foreground">
           此文档含扩展语法，使用源码模式保留完整内容。
         </p>
         <Textarea
           aria-label="文档源码"
-          className="source-document"
+          className="min-h-[50vh] resize-y bg-transparent font-mono text-[13px] leading-relaxed"
           value={value}
           readOnly={readOnly}
           onChange={(e) => onChange(e.target.value)}
         />
       </>
     );
-  return <EditorContent editor={editor} className="document-body" />;
+  return (
+    <>
+      {front && (
+        <details className="mb-4 overflow-hidden rounded-md border">
+          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground">
+            元数据（frontmatter · 原样保留）
+          </summary>
+          <Textarea
+            aria-label="文档元数据"
+            className="min-h-32 resize-y rounded-none border-0 border-t bg-transparent font-mono text-xs leading-relaxed shadow-none focus-visible:ring-0"
+            value={front}
+            readOnly={readOnly}
+            onChange={(e) => onChange(e.target.value + bodyRef.current)}
+          />
+        </details>
+      )}
+      <EditorContent editor={editor} />
+    </>
+  );
 }

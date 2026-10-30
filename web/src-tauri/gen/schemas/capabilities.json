@@ -1,0 +1,1 @@
+{"main":{"identifier":"main","description":"Local KBase window access; filesystem commands are restricted to folders explicitly chosen by the user.","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-close","core:window:allow-destroy","core:event:default"]}}

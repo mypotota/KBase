@@ -582,6 +582,7 @@ export function useWorkspace() {
     refresh,
     openProject,
     openNote,
+    closeNote: clearSelection,
     addProject,
     addNote,
     rename,
