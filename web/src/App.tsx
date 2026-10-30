@@ -7,6 +7,7 @@ import {
   Check,
   ChevronRight,
   Cloud,
+  CloudCheck,
   Code2,
   Download,
   FileText,
@@ -21,12 +22,14 @@ import {
   Moon,
   PanelLeft,
   PanelRight,
+  Pencil,
   Plus,
   Search,
   Settings2,
   Sun,
   Terminal,
   Trash2,
+  TriangleAlert,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -34,6 +37,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -95,6 +99,8 @@ import { Toaster } from "@/components/ui/sonner";
 import { useAppearance } from "./lib/use-appearance";
 import { relativeTime } from "./lib/relative-time";
 import { outlineOf } from "./lib/outline";
+import { splitFrontmatter } from "./core/markdown";
+import { frontmatterText, parseFrontmatter } from "./lib/frontmatter";
 import { useWorkspace } from "./core/use-workspace";
 import MarkdownEditor from "./MarkdownEditor";
 import { MarqueeText } from "./marquee-text";
@@ -196,6 +202,9 @@ export default function App() {
   const asideRef = useRef<PanelImperativeHandle | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [asideCollapsed, setAsideCollapsed] = useState(false);
+  const [editingMeta, setEditingMeta] = useState(false);
+  // Index of the heading the editor is currently scrolled to.
+  const [activeOutline, setActiveOutline] = useState<number | null>(null);
   const [panelsAnimating, setPanelsAnimating] = useState(false);
   const [mobileAside, setMobileAside] = useState(false);
   const animTimer = useRef<number | null>(null);
@@ -203,8 +212,7 @@ export default function App() {
     [command, setCommand] = useState(false),
     [slash, setSlash] = useState(false),
     [editor, setEditor] = useState<Editor | null>(null),
-    [working, setWorking] = useState(false),
-    [title, setTitle] = useState("");
+    [working, setWorking] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]),
     [logQuery, setLogQuery] = useState(""),
     [logLevel, setLogLevel] = useState("all"),
@@ -281,7 +289,6 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    setTitle(w.note?.title ?? "");
     setRead(false);
   }, [w.notePath]);
   useEffect(() => {
@@ -501,6 +508,55 @@ export default function App() {
   function deleteNoteAt(path: string) {
     void withNote(path, () => openModal("delete"));
   }
+  // Scroll spy: the outline entry of the section currently in view is marked
+  // as active while the document scrolls.
+  useEffect(() => {
+    const viewport = document.querySelector<HTMLElement>(
+      "[data-editor-scroll] [data-slot='scroll-area-viewport']",
+    );
+    if (!viewport || !editor) return;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const headings = Array.from(
+        editor.view.dom.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6"),
+      );
+      if (!headings.length) return setActiveOutline(null);
+      const line = viewport.getBoundingClientRect().top + 100;
+      let index = 0;
+      for (let i = 0; i < headings.length; i++) {
+        if (headings[i].getBoundingClientRect().top <= line) index = i;
+        else break;
+      }
+      setActiveOutline(index);
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    update();
+    return () => {
+      viewport.removeEventListener("scroll", onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [editor, outlineOf(editor).length]);
+  // Keep the active outline entry inside the panel.
+  useEffect(() => {
+    if (activeOutline === null) return;
+    const viewport = document.querySelector<HTMLElement>(
+      ".aside-scroll [data-slot='scroll-area-viewport']",
+    );
+    const item = viewport?.querySelector<HTMLElement>(
+      `[data-outline-index="${activeOutline}"]`,
+    );
+    if (!viewport || !item) return;
+    const area = viewport.getBoundingClientRect();
+    const box = item.getBoundingClientRect();
+    if (box.top < area.top + 8)
+      viewport.scrollTop -= area.top + 8 - box.top;
+    else if (box.bottom > area.bottom - 8)
+      viewport.scrollTop += box.bottom - (area.bottom - 8);
+  }, [activeOutline]);
   function openModal(value: Modal) {
     setName(
       value === "root"
@@ -602,76 +658,6 @@ export default function App() {
     else chain.setParagraph().run();
     setSlash(false);
   }
-  const theme = (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      aria-label="切换外观"
-      onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-    >
-      {resolvedTheme === "dark" ? <Sun /> : <Moon />}
-    </Button>
-  );
-  const menu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-sm" aria-label="更多操作">
-          <MoreHorizontal />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuLabel>{w.disk?.root.name ?? "KBase"}</DropdownMenuLabel>
-        {w.project && (
-          <DropdownMenuItem onSelect={() => setPanel("sync")}>
-            <Cloud />
-            项目同步
-          </DropdownMenuItem>
-        )}
-        {w.project && !w.project.virtual && (
-          <>
-            <DropdownMenuItem
-              disabled={!w.disk?.root.native}
-              onSelect={() => openModal("rename-project")}
-            >
-              <Folder />
-              重命名项目
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={!w.disk?.root.native}
-              onSelect={() => openModal("delete-project")}
-            >
-              <Trash2 />
-              将项目移入回收站
-            </DropdownMenuItem>
-          </>
-        )}
-        <DropdownMenuItem
-          disabled={!w.disk}
-          onSelect={() => void act(() => w.refresh())}
-        >
-          <RefreshCw />
-          刷新文件
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled={!w.disk} onSelect={() => setPanel("trash")}>
-          <Trash2 />
-          回收站
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => setPanel("logs")}>
-          <Terminal />
-          诊断日志
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => setPanel("settings")}>
-          <Settings2 />
-          偏好设置
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void act(() => w.close())}>
-          <FolderOpen />
-          切换知识库
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
   const tree = (
     <div className="@container flex h-full min-h-0 flex-col bg-sidebar text-sidebar-foreground">
       <div className="flex items-center gap-2 px-3 pt-4 pb-2 @max-[240px]:gap-1.5 @max-[240px]:px-2">
@@ -743,8 +729,6 @@ export default function App() {
                   </Button>
                 </ContextMenuTrigger>
                 <ContextMenuContent className="w-44">
-                  <ContextMenuLabel className="truncate">{n.title}</ContextMenuLabel>
-                  <ContextMenuSeparator />
                   <ContextMenuItem onSelect={() => newNoteIn("")}>
                     <Plus />
                     新建文档
@@ -752,6 +736,32 @@ export default function App() {
                   <ContextMenuItem onSelect={() => renameNoteAt(n.path, n.title)}>
                     <FileText />
                     重命名
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    onSelect={() => {
+                      void withNote(n.path, () => setRead((v) => !v));
+                    }}
+                  >
+                    <BookOpen />
+                    阅读模式
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    onSelect={() => {
+                      void withNote(n.path, () => openModal("source"));
+                    }}
+                  >
+                    <Code2 />
+                    Markdown 源码
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    onSelect={() => {
+                      void withNote(n.path, () =>
+                        download(n.title + ".md", w.text),
+                      );
+                    }}
+                  >
+                    <Download />
+                    导出 Markdown
                   </ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem
@@ -804,10 +814,6 @@ export default function App() {
                     </Button>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-44">
-                    <ContextMenuLabel className="truncate">
-                      {folder}
-                    </ContextMenuLabel>
-                    <ContextMenuSeparator />
                     <ContextMenuItem onSelect={() => newNoteIn(folder)}>
                       <Plus />
                       在此文件夹新建文档
@@ -851,17 +857,41 @@ export default function App() {
                               </Button>
                             </ContextMenuTrigger>
                             <ContextMenuContent className="w-44">
-                              <ContextMenuLabel className="truncate">
-                                {n.title}
-                              </ContextMenuLabel>
-                              <ContextMenuSeparator />
                               <ContextMenuItem onSelect={() => newNoteIn(folder)}>
                                 <Plus />
                                 在此文件夹新建文档
                               </ContextMenuItem>
-                              <ContextMenuItem onSelect={() => renameNoteAt(n.path, n.title)}>
+                              <ContextMenuItem
+                                onSelect={() => renameNoteAt(n.path, n.title)}
+                              >
                                 <FileText />
                                 重命名
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  void withNote(n.path, () => setRead((v) => !v));
+                                }}
+                              >
+                                <BookOpen />
+                                阅读模式
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  void withNote(n.path, () => openModal("source"));
+                                }}
+                              >
+                                <Code2 />
+                                Markdown 源码
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  void withNote(n.path, () =>
+                                    download(n.title + ".md", w.text),
+                                  );
+                                }}
+                              >
+                                <Download />
+                                导出 Markdown
                               </ContextMenuItem>
                               <ContextMenuSeparator />
                               <ContextMenuItem
@@ -889,21 +919,74 @@ export default function App() {
           </ScrollArea>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="w-44">
+        <ContextMenuContent className="w-48">
           <ContextMenuItem onSelect={() => newNoteIn("")}>
             <Plus />
             新建文档
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuLabel>{w.disk?.root.name ?? "KBase"}</ContextMenuLabel>
+          {w.project && (
+            <ContextMenuItem onSelect={() => setPanel("sync")}>
+              <Cloud />
+              项目同步
+            </ContextMenuItem>
+          )}
+          {w.project && !w.project.virtual && (
+            <>
+              <ContextMenuItem
+                disabled={!w.disk?.root.native}
+                onSelect={() => openModal("rename-project")}
+              >
+                <Folder />
+                重命名项目
+              </ContextMenuItem>
+              <ContextMenuItem
+                disabled={!w.disk?.root.native}
+                onSelect={() => openModal("delete-project")}
+              >
+                <Trash2 />
+                将项目移入回收站
+              </ContextMenuItem>
+            </>
+          )}
+          <ContextMenuItem
+            disabled={!w.disk}
+            onSelect={() => void act(() => w.refresh())}
+          >
+            <RefreshCw />
+            刷新文件
+          </ContextMenuItem>
+          <ContextMenuItem disabled={!w.disk} onSelect={() => setPanel("trash")}>
+            <Trash2 />
+            回收站
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={() => setPanel("logs")}>
+            <Terminal />
+            诊断日志
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={() => setPanel("settings")}>
+            <Settings2 />
+            偏好设置
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => void act(() => w.close())}>
+            <FolderOpen />
+            切换知识库
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
     </div>
   );
   const outline = outlineOf(editor);
+  // The frontmatter is kept out of the editor and shown in the side panel.
+  const { front, body } = splitFrontmatter(w.text);
+  const meta = parseFrontmatter(front);
   const aside = (
     <div className="@container flex h-full min-h-0 flex-col border-l bg-sidebar text-sidebar-foreground">
       <div className="flex items-center gap-2 px-3 pt-4 pb-2">
         <List className="size-4 shrink-0 text-muted-foreground" />
-        <span className="flex-1 truncate text-sm font-medium">文档大纲</span>
+        <span className="flex-1 truncate text-sm font-medium">文档</span>
         <Button
           variant="ghost"
           size="icon-xs"
@@ -913,98 +996,119 @@ export default function App() {
           <X />
         </Button>
       </div>
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="px-2 pb-2">
-          {outline.map((entry) => (
-            <button
-              key={entry.pos}
-              type="button"
-              className={cn(
-                "block w-full truncate rounded-md px-2 py-1 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
-                entry.level === 1 && "font-medium text-foreground",
-              )}
-              style={{ paddingLeft: `${8 + (entry.level - 1) * 12}px` }}
-              onClick={() => {
-                if (!editor) return;
-                const { node } = editor.view.domAtPos(entry.pos + 1);
-                const target =
-                  node instanceof Element ? node : node.parentElement;
-                target?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-            >
-              {entry.text || "（无标题）"}
-            </button>
-          ))}
-          {!outline.length && (
-            <p className="px-2 py-3 text-xs text-muted-foreground">
-              {editor ? "当前文档没有标题" : "源码模式下请使用文档内的 Markdown 标题"}
+      <ScrollArea className="aside-scroll min-h-0 flex-1">
+        <div className="px-2 pb-4">
+          <section className="pt-3">
+            <p className="px-2 pb-1.5 text-xs font-medium tracking-wide text-muted-foreground">
+              文档大纲
             </p>
+            {outline.map((entry, index) => (
+              <button
+                key={entry.pos}
+                type="button"
+                data-outline-index={index}
+                className={cn(
+                  "block w-full truncate rounded-md px-2 py-1 text-left text-sm transition-colors",
+                  entry.level === 1 && "font-medium",
+                  activeOutline === index
+                    ? "bg-accent font-medium text-accent-foreground"
+                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                )}
+                style={{ paddingLeft: `${8 + (entry.level - 1) * 12}px` }}
+                onClick={() => {
+                  if (!editor) return;
+                  const { node } = editor.view.domAtPos(entry.pos + 1);
+                  const target =
+                    node instanceof Element ? node : node.parentElement;
+                  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+              >
+                {entry.text || "（无标题）"}
+              </button>
+            ))}
+            {!outline.length && (
+              <p className="px-2 py-3 text-xs text-muted-foreground">
+                {editor
+                  ? "当前文档没有标题"
+                  : "源码模式下请使用文档内的 Markdown 标题"}
+              </p>
+            )}
+          </section>
+          {front && (
+            <section className="mt-4 border-t pt-3">
+              <div className="flex items-center gap-1 px-2 pb-2">
+                <p className="flex-1 text-xs font-medium tracking-wide text-muted-foreground">
+                  元数据
+                </p>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={editingMeta ? "完成编辑元数据" : "编辑元数据"}
+                  onClick={() => setEditingMeta((v) => !v)}
+                >
+                  {editingMeta ? <Check /> : <Pencil />}
+                </Button>
+              </div>
+              {editingMeta ? (
+                <>
+                  <Textarea
+                    aria-label="文档元数据"
+                    className="field-sizing-fixed min-h-24 w-full resize-y rounded-md bg-background/70 font-mono text-[11px] leading-relaxed"
+                    value={front}
+                    readOnly={read}
+                    onChange={(e) =>
+                      void act(() => w.updateText(e.target.value + body))
+                    }
+                  />
+                  <p className="px-2 pt-1 text-[11px] text-muted-foreground/70">
+                    YAML frontmatter · 原样保留
+                  </p>
+                </>
+              ) : (
+                <dl className="space-y-2 px-2">
+                  {meta.error && (
+                    <p className="text-[11px] text-destructive">{meta.error}</p>
+                  )}
+                  {meta.fields.map((field) => (
+                    <div key={field.key}>
+                      <dt className="text-[11px] text-muted-foreground">
+                        {field.key}
+                      </dt>
+                      <dd className="mt-0.5 text-xs leading-relaxed break-words">
+                        {Array.isArray(field.value) ? (
+                          <span className="flex flex-wrap gap-1">
+                            {field.value.map((item, index) => (
+                              <Badge
+                                key={`${field.key}-${index}`}
+                                variant="secondary"
+                                className="rounded-md px-1.5 py-0 text-[11px] font-normal"
+                              >
+                                {frontmatterText(item)}
+                              </Badge>
+                            ))}
+                          </span>
+                        ) : (
+                          <span
+                            className="line-clamp-4"
+                            title={frontmatterText(field.value)}
+                          >
+                            {frontmatterText(field.value)}
+                          </span>
+                        )}
+                      </dd>
+                    </div>
+                  ))}
+                  {!meta.fields.length && !meta.error && (
+                    <p className="text-[11px] text-muted-foreground">
+                      没有可显示的元数据
+                    </p>
+                  )}
+                </dl>
+              )}
+            </section>
           )}
         </div>
       </ScrollArea>
-      <div className="border-t p-2">
-        <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground">
-          文档操作
-        </p>
-        <div className="flex flex-col gap-0.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-full justify-start gap-2 px-2 text-left font-normal"
-            onClick={() => setRead((v) => !v)}
-          >
-            <BookOpen className="size-3.5 shrink-0 text-muted-foreground" />
-            {read ? "返回编辑" : "阅读模式"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-full justify-start gap-2 px-2 text-left font-normal"
-            onClick={() => openModal("source")}
-          >
-            <Code2 className="size-3.5 shrink-0 text-muted-foreground" />
-            Markdown 源码
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-full justify-start gap-2 px-2 text-left font-normal"
-            onClick={() => openModal("rename")}
-          >
-            <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-            重命名
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-full justify-start gap-2 px-2 text-left font-normal"
-            onClick={() => download(w.note!.title + ".md", w.text)}
-          >
-            <Download className="size-3.5 shrink-0 text-muted-foreground" />
-            导出 Markdown
-          </Button>
-          {w.dirty && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 w-full justify-start gap-2 px-2 text-left font-normal"
-              onClick={() => openModal("discard")}
-            >
-              <RefreshCw className="size-3.5 shrink-0 text-muted-foreground" />
-              放弃未保存的修改
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-full justify-start gap-2 px-2 text-left font-normal text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={() => openModal("delete")}
-          >
-            <Trash2 className="size-3.5 shrink-0" />
-            移入回收站
-          </Button>
-        </div>
-      </div>
     </div>
   );
   const editorPane = (
@@ -1062,7 +1166,7 @@ export default function App() {
       )}
       {w.note ? (
         <>
-          <ScrollArea className="min-h-0 flex-1">
+          <ScrollArea className="min-h-0 flex-1" data-editor-scroll="">
             <div className="mx-auto w-full max-w-2xl px-8 py-8">
               <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
                 <FileText className="size-3.5 shrink-0" />
@@ -1078,19 +1182,6 @@ export default function App() {
                       : "已保存到本地"}
                 </span>
               </div>
-              <Input
-                className="h-10 border-0 bg-transparent px-0 text-2xl font-semibold tracking-tight shadow-none focus-visible:ring-0"
-                aria-label="文档名称"
-                value={title}
-                readOnly={read}
-                onChange={(e) => setTitle(e.target.value)}
-                onBlur={() => {
-                  if (title !== w.note?.title) void act(() => w.rename(title));
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") e.currentTarget.blur();
-                }}
-              />
               {w.recovery && (
                 <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2.5 text-sm">
                   <span>发现尚未写入磁盘的恢复草稿。</span>
@@ -1137,15 +1228,43 @@ export default function App() {
             </div>
           </ScrollArea>
           <footer className="flex h-9 shrink-0 items-center justify-between gap-4 border-t px-4 text-xs text-muted-foreground">
-            <span className="flex shrink-0 items-center gap-1.5">
+            <span className="flex min-w-0 items-center gap-1.5">
               {w.saving ? (
-                <Loader2 className="size-3 animate-spin" />
+                <Loader2 className="size-3 shrink-0 animate-spin" />
+              ) : w.dirty ? (
+                <span className="size-1.5 shrink-0 rounded-full bg-foreground" />
               ) : (
-                <Check className="size-3" />
+                <Check className="size-3 shrink-0" />
               )}
-              {w.dirty ? "修改尚未落盘" : "本地文件已保存"}
+              <span className="truncate">{w.note.path}</span>
             </span>
-            <span className="truncate">{w.note.path}</span>
+            <button
+              type="button"
+              aria-label="项目同步"
+              onClick={() => setPanel("sync")}
+              className="flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-hidden focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            >
+              {syncing ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : syncState.conflicts.length ? (
+                <TriangleAlert className="size-3.5 text-destructive" />
+              ) : binding ? (
+                <CloudCheck className="size-3.5" />
+              ) : (
+                <Cloud className="size-3.5" />
+              )}
+              <span aria-live="polite">
+                {syncing
+                  ? "同步中"
+                  : syncState.conflicts.length
+                    ? `${syncState.conflicts.length} 个冲突`
+                    : binding
+                      ? syncState.lastSync
+                        ? `已同步 · ${new Date(syncState.lastSync).toLocaleTimeString()}`
+                        : "已连接"
+                      : "未连接同步"}
+              </span>
+            </button>
           </footer>
         </>
       ) : (
@@ -1251,16 +1370,14 @@ export default function App() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {w.project && (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="项目同步"
-                onClick={() => setPanel("sync")}
-              >
-                {syncing ? <Loader2 className="animate-spin" /> : <Cloud />}
-              </Button>
-            )}
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="偏好设置"
+              onClick={() => setPanel("settings")}
+            >
+              <Settings2 />
+            </Button>
             {w.note && (
               <Button
                 variant="ghost"
@@ -1271,8 +1388,6 @@ export default function App() {
                 <PanelRight />
               </Button>
             )}
-            {theme}
-            {menu}
           </div>
         </header>
         {!w.disk ? (
@@ -1746,6 +1861,29 @@ export default function App() {
                         </TabsTrigger>
                       </TabsList>
                     </Tabs>
+                  </div>
+                  <Separator className="my-2" />
+                  <div className="flex items-center justify-between gap-4 py-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">项目同步</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {binding
+                          ? syncState.lastSync
+                            ? `上次同步 ${new Date(syncState.lastSync).toLocaleString()}`
+                            : "已连接同步服务器"
+                          : "当前项目仅保存在本地"}
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      disabled={!w.project}
+                      onClick={() => setPanel("sync")}
+                    >
+                      <Cloud />
+                      {syncing ? "同步中" : "管理同步"}
+                    </Button>
                   </div>
                   <Separator className="my-2" />
                   <div className="flex items-center justify-between gap-4 py-3">

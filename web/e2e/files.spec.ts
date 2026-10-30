@@ -96,14 +96,18 @@ test("Local Markdown files remain directly accessible and external edits are pre
   await p.waitForTimeout(1200);
   console.log("disk before delete", JSON.stringify(await diskText()));
   await p
-    .locator('[data-testid="aside"]')
-    .getByRole("button", { name: "移入回收站", exact: true })
-    .click();
+    .locator('[data-testid="files"] .sidebar-item')
+    .filter({ hasText: "本地笔记" })
+    .first()
+    .click({ button: "right" });
+  await p.getByRole("menuitem", { name: "移入回收站", exact: true }).click();
   await p
     .getByRole("dialog")
     .getByRole("button", { name: "移入回收站", exact: true })
     .click();
-  await p.getByRole("button", { name: "更多操作", exact: true }).click();
+  await p
+    .locator('[data-testid="files"] [data-slot="scroll-area-viewport"]')
+    .click({ button: "right", position: { x: 12, y: 220 } });
   await p.getByRole("menuitem", { name: "回收站", exact: true }).click();
   await p.getByRole("button", { name: "恢复", exact: true }).click();
   await p

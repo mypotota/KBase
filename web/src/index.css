@@ -171,6 +171,50 @@
 }
 
 /*
+ * The side panel holds editable content (the metadata field); Radix renders
+ * the scroll viewport content as a table, which would grow to the widest
+ * child and push the panel content out of sight.
+ */
+.aside-scroll [data-slot="scroll-area-viewport"] > div {
+  display: block !important;
+  min-width: 0 !important;
+}
+
+/*
+ * Mermaid diagrams: the source is shown while the cursor is inside the block,
+ * the rendered diagram otherwise.
+ */
+.mermaid-node.is-diagram .mermaid-preview {
+  margin: 1em 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  padding: 1rem;
+}
+.mermaid-node.is-diagram:not(.is-editing) pre {
+  display: none;
+}
+.mermaid-node.is-diagram.is-editing .mermaid-preview {
+  display: none;
+}
+.mermaid-svg svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+.mermaid-error {
+  color: var(--destructive);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+}
+.mermaid-hint {
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
+
+/*
  * Document editor typography. The Tiptap DOM is generated at runtime and
  * cannot carry utility classes, so these rules stay in CSS. Colors only use
  * theme tokens; sizes follow the 14px UI base.

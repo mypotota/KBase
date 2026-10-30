@@ -3,9 +3,8 @@ import { toast } from "sonner";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
-import { createLowlight } from "lowlight";
-import bash from "highlight.js/lib/languages/bash";
+import { MermaidCodeBlock } from "./mermaid-block";
+import { createLowlight } from "lowlight";import bash from "highlight.js/lib/languages/bash";
 import c from "highlight.js/lib/languages/c";
 import cpp from "highlight.js/lib/languages/cpp";
 import diff from "highlight.js/lib/languages/diff";
@@ -79,7 +78,7 @@ export default function MarkdownEditor(props: Props) {
         undoRedo: { depth: 100 },
         codeBlock: false,
       }),
-      CodeBlockLowlight.configure({ lowlight, defaultLanguage: "plaintext" }),
+      MermaidCodeBlock.configure({ lowlight, defaultLanguage: "plaintext" }),
       Markdown,
       Placeholder.configure({ placeholder: "写下你的想法，或输入 / 插入内容" }),
       TaskList,
@@ -192,23 +191,7 @@ export default function MarkdownEditor(props: Props) {
         />
       </>
     );
-  return (
-    <>
-      {front && (
-        <details className="mb-4 overflow-hidden rounded-md border">
-          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground">
-            元数据（frontmatter · 原样保留）
-          </summary>
-          <Textarea
-            aria-label="文档元数据"
-            className="min-h-32 resize-y rounded-none border-0 border-t bg-transparent font-mono text-xs leading-relaxed shadow-none focus-visible:ring-0"
-            value={front}
-            readOnly={readOnly}
-            onChange={(e) => onChange(e.target.value + bodyRef.current)}
-          />
-        </details>
-      )}
-      <EditorContent editor={editor} />
-    </>
-  );
+  // The frontmatter never enters the editor; it is kept out of the document
+  // and shown in the side panel instead.
+  return <EditorContent editor={editor} />;
 }
