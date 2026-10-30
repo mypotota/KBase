@@ -1,0 +1,32 @@
+[
+  {
+    "id": "welcome",
+    "name": "欢迎来到 KBase",
+    "folder": "开始使用",
+    "html": "<div class=\"doc-eyebrow\"><span class=\"shortline\"></span> YOUR IDEAS, ROOTED HERE</div><h1>欢迎来到 KBase</h1><div class=\"docmeta\"><span><svg><use href=\"#i-clock\"/></svg> 今天更新</span><span>·</span><span>我的知识花园</span><span class=\"pill\">入门指南</span></div><p class=\"intro block\">让零散的想法，有一个安静的归处。<br>从一个文件夹开始，慢慢长成属于你的知识花园。</p><div class=\"callout\"><svg><use href=\"#i-leaf\"/></svg><div><strong>本地优先，安心记录。</strong><br>你的每一篇文档，都是本地文件夹里真实的 Markdown 文件。<br>无需网络，也能让思考继续。</div></div><h2 id=\"section-1\"><span class=\"num\">01</span>从这里开始</h2><p class=\"block\">KBase 把熟悉的文件夹，变成一个专注、轻盈的知识空间。左侧整理文档，中间自由书写，右侧随时掌握内容脉络。</p><ul class=\"block\"><li><strong>整理你的项目</strong> — 用文件夹建立清晰的层级。</li><li><strong>自然地写作</strong> — 输入 <span class=\"badge\">/</span> 插入标题、列表或代码块。</li><li><strong>在设备间流动</strong> — 连接自己的服务，让知识随身而行。</li></ul><div class=\"doc-rule\"></div><h2 id=\"section-2\"><span class=\"num\">02</span>你的知识，你来掌控</h2><div class=\"principles\"><div class=\"mini-card\"><svg><use href=\"#i-folder\"/></svg><strong>文件即知识库</strong><p>打开已有文件夹即可开始。<br>不改变你的文件组织习惯。</p></div><div class=\"mini-card\"><svg><use href=\"#i-sync\"/></svg><strong>思考自由流动</strong><p>本地保存与远端同步相互独立。<br>离线编辑，上线后从容同步。</p></div></div><h2 id=\"section-3\"><span class=\"num\">03</span>试着写下第一个想法</h2><p class=\"block\" data-placeholder=\"输入内容，或输入 / 选择块类型\">点击这里，写下今天值得留下的一个想法……</p><label class=\"check\"><input type=\"checkbox\"><span>创建我的第一篇文档</span></label><label class=\"check\"><input type=\"checkbox\"><span>整理一个属于自己的项目文件夹</span></label><label class=\"check\"><input type=\"checkbox\"><span>连接自己的同步服务器</span></label><h2 id=\"section-4\"><span class=\"num\">04</span>为长久的记录而设计</h2><p class=\"block\">无需一次完成所有整理。先把想法留下，让它们在日常的阅读与回顾中慢慢连接。</p>"
+  },
+  {
+    "id": "shortcuts",
+    "name": "常用操作与快捷键",
+    "folder": "开始使用",
+    "html": "<div class=\"doc-eyebrow\">MAKE ROOM FOR YOUR FLOW</div><h1>常用操作与快捷键</h1><div class=\"docmeta\">让工具跟上思考的速度</div><h2 id=\"section-1\">写作与导航</h2><p class=\"block\">⌘ / Ctrl + K：查找文件<br>⌘ / Ctrl + S：立即保存<br>⌘ / Ctrl + B：加粗所选文字<br>Esc：关闭弹层与菜单</p><h2 id=\"section-2\">整理工作空间</h2><p class=\"block\">拖动左侧分隔线调整文件树宽度，双击恢复默认。点击顶部面板图标收起侧栏，让注意力回到文字。</p><h2 id=\"section-3\">插入新的内容</h2><p class=\"block\">在段落中输入 /，选择段落、标题、列表、待办或代码块。</p>"
+  },
+  {
+    "id": "design",
+    "name": "产品设计笔记",
+    "folder": "我的项目",
+    "html": "<div class=\"doc-eyebrow\">PROJECT NOTES / 001</div><h1>产品设计笔记</h1><div class=\"docmeta\">今天更新 · 我的项目</div><h2 id=\"section-1\">设计的出发点</h2><p class=\"block\">好的工具应该安静地退到内容后面。在这里，我们把可读性、确定性和长期可用放在第一位。</p><div class=\"callout\"><svg><use href=\"#i-leaf\"/></svg><div>少一些打扰，多一些思考的空间。</div></div><h2 id=\"section-2\">体验原则</h2><ul class=\"block\"><li>保存状态清晰可见。</li><li>不让同步阻塞本地写作。</li><li>所有重要操作都有可恢复的路径。</li></ul><h2 id=\"section-3\">接下来的工作</h2><label class=\"check\"><input type=\"checkbox\" checked><span>梳理桌面端的信息结构</span></label><label class=\"check\"><input type=\"checkbox\"><span>验证 Android 端的编辑流程</span></label>"
+  },
+  {
+    "id": "sync-note",
+    "name": "同步方案",
+    "folder": "我的项目",
+    "html": "<div class=\"doc-eyebrow\">TECHNICAL NOTES</div><h1>同步方案</h1><div class=\"docmeta\">今天更新 · 我的项目</div><h2 id=\"section-1\">本地优先</h2><p class=\"block\">先将修改安全保存到本机，再加入同步队列。网络变化不会中断编辑。</p><h2 id=\"section-2\">版本与冲突</h2><p class=\"block\">每次修改携带基线版本。如果两台设备编辑了同一份基线，保留双方内容，交由用户对比合并。</p><div class=\"codebox block\">save_local(document)\nqueue_sync(document, base_version)\nif remote.version != base_version:\n    preserve_both_versions()</div><h2 id=\"section-3\">可追踪的执行过程</h2><p class=\"block\">同步任务使用独立任务编号，客户端与服务端日志可以关联追踪。默认不记录文档正文或身份凭据。</p>"
+  },
+  {
+    "id": "reading",
+    "name": "阅读摘记",
+    "folder": "日常记录",
+    "html": "<div class=\"doc-eyebrow\">EVERYDAY INSPIRATION</div><h1>阅读摘记</h1><div class=\"docmeta\">日常记录 · 持续积累</div><h2 id=\"section-1\">把阅读变成自己的理解</h2><p class=\"block\">记录让你停下来的那句话，也记录它为什么让你停下。</p><h2 id=\"section-2\">今天的思考</h2><p class=\"block\" data-placeholder=\"写下一段新的理解……\">知识的价值，在于它如何改变我们观察世界的方式。</p>"
+  }
+]

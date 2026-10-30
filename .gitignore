@@ -1,0 +1,15 @@
+node_modules/
+web/dist/
+*.tsbuildinfo
+.DS_Store
+web/src-tauri/target/
+web/preview-dist/
+server/data/
+/data/
+.env
+.env.*
+!.env.example
+*.log
+dist-desktop/
+web/test-results/
+web/playwright-report/

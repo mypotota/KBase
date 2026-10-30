@@ -1,0 +1,38 @@
+services:
+  sync:
+    build: ./server
+    environment:
+      KBASE_ADMIN_PASSWORD: ${KBASE_ADMIN_PASSWORD:?Set KBASE_ADMIN_PASSWORD in .env; minimum 12 characters}
+      KBASE_ALLOWED_ORIGINS: ${KBASE_ALLOWED_ORIGINS:-tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost:8080,http://127.0.0.1:8080}
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - sync-data:/data
+    restart: unless-stopped
+  web:
+    build: ./web
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      sync:
+        condition: service_healthy
+    restart: unless-stopped
+  https:
+    image: caddy:2-alpine
+    profiles: [https]
+    environment:
+      KBASE_DOMAIN: ${KBASE_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+volumes:
+  sync-data:
+  caddy-data:
+  caddy-config:
