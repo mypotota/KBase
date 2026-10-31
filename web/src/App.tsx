@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import type { Editor } from "@tiptap/react";
 import {
   ArrowLeft,
@@ -125,7 +126,28 @@ import {
 import { decode } from "./core/fs";
 import { imageUrl, saveImage } from "./core/attachments";
 import { getRecord } from "./core/db";
-import { restore, type TrashItem } from "./core/library";
+import {
+  restore,
+  type Note,
+  type Project,
+  type TrashItem,
+} from "./core/library";
+import SplitPane from "./SplitPane";
+import TabStrip, {
+  NOTE_MIME,
+  TAB_SRC_MIME,
+  type PaneId,
+  type PaneQuad,
+  type PaneTabs,
+} from "./TabStrip";
+
+// macOS desktop uses an overlay title bar: the traffic lights float above the
+// toolbar, so the toolbar must leave room for them and act as the drag surface.
+// The drag region needs the "deep" value — a bare attribute only drags on
+// direct clicks of the element itself, so the child clusters (icon, labels,
+// button groups) would swallow the mousedown and the bar would not move.
+const isMacOverlayTitleBar =
+  isTauri() && navigator.platform.toLowerCase().includes("mac");
 
 // localStorage can be unavailable in restricted contexts; the panel layout
 // simply is not persisted then.
@@ -142,6 +164,13 @@ const layoutStorage = {
       localStorage.setItem(key, value);
     } catch {
       /* Keep the layout usable without persistence. */
+    }
+  },
+  removeItem(key: string) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* Nothing to clean up. */
     }
   },
 };
@@ -162,6 +191,57 @@ function saveSidebarWidth(value: number) {
   layoutStorage.setItem(sidebarWidthKey, String(value));
 }
 
+// 工作区恢复：记住上次打开的知识库、项目、文档、标签页、分屏与滚动位置，
+// 仅存界面状态（localStorage），文档内容始终以本地文件为准。
+const workspaceKey = "kbase-workspace";
+type WorkspaceSession = {
+  rootId: string;
+  projectPath: string;
+  notePath: string | null;
+  tabs: string[];
+  panes: Partial<Record<PaneQuad, PaneTabs>> | null;
+  scroll: { main: number; ref: number };
+};
+function loadSession(): WorkspaceSession | null {
+  try {
+    const raw = layoutStorage.getItem(workspaceKey);
+    if (!raw) return null;
+    const value = JSON.parse(raw);
+    if (!value || typeof value.rootId !== "string") return null;
+    if (typeof value.projectPath !== "string") return null;
+    // 分屏块校验：每块必须有 tabs 数组。
+    const panes =
+      value.panes && typeof value.panes === "object"
+        ? (Object.fromEntries(
+            Object.entries(value.panes).filter(([, pane]) => {
+              const p = pane as PaneTabs | undefined;
+              return !!p && Array.isArray(p.tabs);
+            }),
+          ) as Partial<Record<PaneQuad, PaneTabs>>)
+        : null;
+    return {
+      ...value,
+      tabs: Array.isArray(value.tabs) ? value.tabs : [],
+      panes,
+      scroll:
+        value.scroll && typeof value.scroll.main === "number"
+          ? value.scroll
+          : { main: 0, ref: 0 },
+    } as WorkspaceSession;
+  } catch {
+    return null;
+  }
+}
+// ScrollArea 的滚动容器藏在组件树里，按外层标记定位读取。
+function viewportScroll(marker: string): number {
+  return (
+    document
+      .querySelector<HTMLElement>(marker)
+      ?.querySelector<HTMLElement>("[data-slot='scroll-area-viewport']")
+      ?.scrollTop ?? 0
+  );
+}
+
 function download(name: string, value: string) {
   const url = URL.createObjectURL(
     new Blob([value], { type: "text/plain;charset=utf-8" }),
@@ -171,6 +251,24 @@ function download(name: string, value: string) {
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+// 侧栏拖入文件时按光标在内容区的位置四分：0=左上（主区）1=右上 2=左下 3=右下。
+// 判定参照始终是整个内容区：网格布局下爬到 grid 面板，单栏下是 editor 面板；
+// 若用被拖放的那块面板当参照，网格中的落点会被局部四分算错。
+function contentAreaOf(el: HTMLElement): HTMLElement {
+  let node: HTMLElement | null = el;
+  while (node && node.id !== "grid") node = node.parentElement;
+  if (node) return node;
+  node = el;
+  while (node && node.id !== "editor") node = node.parentElement;
+  return node ?? el;
+}
+function dropQuadOf(e: ReactDragEvent): 0 | PaneQuad {
+  const container = contentAreaOf(e.currentTarget as HTMLElement);
+  const rect = container.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  return ((y < rect.height / 2 ? 0 : 2) + (x >= rect.width / 2 ? 1 : 0)) as 0 | PaneQuad;
 }
 type Panel = "sync" | "logs" | "settings" | "trash" | null;
 type Modal =
@@ -207,6 +305,42 @@ export default function App() {
   const [activeOutline, setActiveOutline] = useState<number | null>(null);
   const [panelsAnimating, setPanelsAnimating] = useState(false);
   const [mobileAside, setMobileAside] = useState(false);
+  // 四分屏网格：主编辑区固定占左上（象限 0），1/2/3（右上/左下/右下）由
+  // 右键或拖放创建，标签关空后该块收起，最多四块。
+  const [panes, setPanes] = useState<Partial<Record<PaneQuad, PaneTabs>>>({});
+  const [dropHint, setDropHint] = useState<0 | PaneQuad | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  // 拖放指示的兜底清理：drop 可能被子元素拦截（如标签条内 stopPropagation）
+  // 或拖动被取消（Esc、拖出窗口）。监听放在捕获阶段，子元素的
+  // stopPropagation 无法阻止它，dragend 则覆盖没有 drop 的取消路径。
+  useEffect(() => {
+    const clear = () => {
+      setDropActive(false);
+      setDropHint(null);
+    };
+    window.addEventListener("dragend", clear, true);
+    window.addEventListener("drop", clear, true);
+    // Finder 拖文件进来时保持浏览器默认行为被抑制，防止 WKWebView
+    // 导航打开文件（dragDropEnabled 已关闭，原生拦截不再生效）。
+    const guard = (e: DragEvent) => {
+      if (e.dataTransfer && [...e.dataTransfer.types].includes("Files"))
+        e.preventDefault();
+    };
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    return () => {
+      window.removeEventListener("dragend", clear, true);
+      window.removeEventListener("drop", clear, true);
+      window.removeEventListener("dragover", guard);
+      window.removeEventListener("drop", guard);
+    };
+  }, []);
+  const restoredRef = useRef(false);
+  const pendingScroll = useRef<{
+    note: string | null;
+    main: number;
+    ref: number;
+  } | null>(null);
   const animTimer = useRef<number | null>(null);
   const [query, setQuery] = useState(""),
     [command, setCommand] = useState(false),
@@ -482,6 +616,144 @@ export default function App() {
     if (target) void act(() => w.openNote(target));
     else void act(() => w.closeNote());
   }
+  // 分屏操作：quad 0 是主区（直接打开），1/2/3 各是一块分屏区，上限即四块。
+  function openInPane(quad: 0 | PaneQuad, path: string) {
+    if (quad === 0) {
+      void act(() => w.openNote(path));
+      return;
+    }
+    setPanes((cur) => {
+      const pane = cur[quad];
+      if (!pane) return { ...cur, [quad]: { tabs: [path], active: path } };
+      const tabs = pane.tabs.includes(path) ? pane.tabs : [...pane.tabs, path];
+      return { ...cur, [quad]: { tabs, active: path } };
+    });
+  }
+  function closePaneTab(quad: PaneQuad, path: string) {
+    setPanes((cur) => {
+      const pane = cur[quad];
+      if (!pane) return cur;
+      const index = pane.tabs.indexOf(path);
+      const tabs = pane.tabs.filter((t) => t !== path);
+      if (!tabs.length) {
+        // 标签关空，该块随之收起。
+        const next = { ...cur };
+        delete next[quad];
+        return next;
+      }
+      const active =
+        pane.active === path
+          ? (tabs[index] ?? tabs[tabs.length - 1])
+          : pane.active;
+      return { ...cur, [quad]: { tabs, active } };
+    });
+  }
+  // 项目文档列表变化（删除/重命名）时同步清理分屏里失效的标签。
+  useEffect(() => {
+    const paths = new Set((w.project?.notes ?? []).map((n) => n.path));
+    setPanes((cur) => {
+      let changed = false;
+      const next: Partial<Record<PaneQuad, PaneTabs>> = {};
+      for (const quad of [1, 2, 3] as const) {
+        const pane = cur[quad];
+        if (!pane) continue;
+        const tabs = pane.tabs.filter((p) => paths.has(p));
+        if (!tabs.length) {
+          changed = true;
+          continue; // 该块整块收起
+        }
+        const active =
+          pane.active && tabs.includes(pane.active) ? pane.active : tabs[0];
+        if (tabs.length !== pane.tabs.length || active !== pane.active)
+          changed = true;
+        next[quad] = { tabs, active };
+      }
+      return changed ? next : cur;
+    });
+  }, [w.project?.notes]);
+  // 工作区状态变化后延迟持久化；仅在用户真正关闭知识库时清除记录。
+  // 应用启动时磁盘尚未恢复，此时不能清掉待恢复的会话。
+  const hadDisk = useRef(false);
+  useEffect(() => {
+    if (w.disk) {
+      hadDisk.current = true;
+    } else if (hadDisk.current) {
+      hadDisk.current = false;
+      layoutStorage.removeItem(workspaceKey);
+      return;
+    } else return;
+    const id = setTimeout(() => {
+      const session: WorkspaceSession = {
+        rootId: w.disk!.root.id,
+        projectPath: w.projectPath ?? "",
+        notePath: w.notePath,
+        tabs,
+        panes: Object.keys(panes).length ? panes : null,
+        scroll: {
+          main: viewportScroll("[data-editor-scroll]"),
+          ref: viewportScroll("[data-split-scroll]"),
+        },
+      };
+      if (!session.projectPath && !session.notePath && !session.tabs.length)
+        return;
+      layoutStorage.setItem(workspaceKey, JSON.stringify(session));
+    }, 400);
+    return () => clearTimeout(id);
+  }, [w.disk, w.projectPath, w.notePath, tabs, panes]);
+  // 启动恢复：等 roots 载入后按记录重开知识库、项目、文档、分屏。浏览器
+  // 端文件夹授权被系统拒绝时按普通失败处理，不影响手动打开。
+  useEffect(() => {
+    if (restoredRef.current || w.disk || !w.roots.length) return;
+    const saved = loadSession();
+    restoredRef.current = true;
+    if (!saved) return;
+    const root = w.roots.find((r) => r.id === saved.rootId);
+    if (!root) return;
+    void act(async () => {
+      await w.reopen(root);
+      pendingScroll.current = {
+        note: saved.notePath,
+        main: saved.scroll.main,
+        ref: saved.scroll.ref,
+      };
+      if (saved.panes) setPanes(saved.panes);
+      // activate 之后 React 还未重渲染，直接用扫描结果定位项目。
+      const projects = (await workspaceLatest.current.refresh()) ?? [];
+      const project = projects.find((p) => p.path === saved.projectPath);
+      if (!project) return;
+      await workspaceLatest.current.openProject(project);
+      const latest = workspaceLatest.current;
+      if (saved.notePath && latest.notePath !== saved.notePath)
+        await latest.openNote(saved.notePath);
+      if (saved.tabs.length) setTabs(saved.tabs);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w.roots, w.disk]);
+  // 恢复的滚动位置只应用在“被记住的那篇文档”真正打开之后。
+  useEffect(() => {
+    const target = pendingScroll.current;
+    if (!target || !w.notePath || target.note !== w.notePath) return;
+    pendingScroll.current = null;
+    const timer = setTimeout(() => {
+      if (!target.main) return;
+      const viewport = document.querySelector<HTMLElement>(
+        "[data-editor-scroll] [data-slot='scroll-area-viewport']",
+      );
+      if (viewport) viewport.scrollTop = target.main;
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [w.notePath]);
+  // 全库搜索：跨项目打开文档；目标不是当前项目时先切换项目。
+  async function openFromLibrary(project: Project, note: Note) {
+    setCommand(false);
+    setMobileNav(false);
+    await act(async () => {
+      if (workspaceLatest.current.projectPath !== project.path)
+        await workspaceLatest.current.openProject(project);
+      if (workspaceLatest.current.notePath !== note.path)
+        await workspaceLatest.current.openNote(note.path);
+    });
+  }
   // Right-click actions work on any document: the note is opened first when
   // it is not the one being edited.
   async function withNote(path: string, action: () => void) {
@@ -660,11 +932,18 @@ export default function App() {
   }
   const tree = (
     <div className="@container flex h-full min-h-0 flex-col bg-sidebar text-sidebar-foreground">
-      <div className="flex items-center gap-2 px-3 pt-4 pb-2 @max-[240px]:gap-1.5 @max-[240px]:px-2">
-        <Folder className="size-4 shrink-0 text-muted-foreground" />
-        <MarqueeText className="flex-1 text-sm font-medium">
-          {w.project?.name}
-        </MarqueeText>
+      <div className="flex items-center gap-2.5 px-3 pt-4 pb-3 @max-[240px]:gap-2 @max-[240px]:px-2">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/80 text-muted-foreground">
+          <Folder className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1 leading-tight">
+          <MarqueeText className="text-sm font-semibold tracking-tight">
+            {w.project?.name}
+          </MarqueeText>
+          <p className="mt-0.5 text-[11px] tabular-nums text-muted-foreground/80">
+            {w.project ? `${w.project.notes.length} 篇文档` : "未选择项目"}
+          </p>
+        </div>
         <Button
           variant="ghost"
           size="icon-xs"
@@ -674,24 +953,18 @@ export default function App() {
           <ArrowLeft />
         </Button>
       </div>
-      <div className="px-3 pb-2 @max-[240px]:px-2">
-        <Button
-          variant="outline"
-          size="sm"
-          className="w-full justify-start gap-2 font-normal text-muted-foreground"
-          onClick={() => setCommand(true)}
-        >
-          <Search className="size-3.5" />
-          查找文档
-          <span className="ml-auto hidden text-xs tracking-widest @min-[280px]:block">
-            ⌘K
-          </span>
-        </Button>
-      </div>
-      <div className="flex items-center justify-between px-4 pb-1 @max-[240px]:px-3">
-        <span className="text-xs font-medium tracking-wide text-muted-foreground">
+      <div className="flex items-center justify-between pr-2 pl-4 pb-1 @max-[240px]:pl-3">
+        <span className="text-[11px] font-semibold tracking-widest text-muted-foreground/60">
           文档
         </span>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label="新建文档"
+          onClick={() => newNoteIn("")}
+        >
+          <Plus />
+        </Button>
       </div>
       {/* Right-clicking empty space creates a document in the project root. */}
       <ContextMenu>
@@ -707,9 +980,14 @@ export default function App() {
                   <Button
                     variant="ghost"
                     size="sm"
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(NOTE_MIME, n.path);
+                      e.dataTransfer.effectAllowed = "copy";
+                    }}
                     style={{ animationDelay: `${Math.min(index, 14) * 24}ms` }}
                     className={cn(
-                      "sidebar-item h-8 w-full justify-start gap-2 px-2 text-left font-normal @max-[240px]:gap-1.5 @max-[240px]:px-1 @max-[240px]:has-[>svg]:px-1",
+                      "sidebar-item relative h-8 w-full justify-start gap-2 px-2 text-left font-normal @max-[240px]:gap-1.5 @max-[240px]:px-1 @max-[240px]:has-[>svg]:px-1",
                       w.notePath === n.path
                         ? "bg-accent text-accent-foreground"
                         : "text-foreground/80",
@@ -721,6 +999,12 @@ export default function App() {
                       })
                     }
                   >
+                    {w.notePath === n.path && (
+                      <span
+                        aria-hidden
+                        className="absolute top-1/2 left-0 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary"
+                      />
+                    )}
                     <FileText className="size-3.5 shrink-0 text-muted-foreground" />
                     <MarqueeText className="flex-1">{n.title}</MarqueeText>
                     <span className="hidden shrink-0 text-[11px] text-muted-foreground/70 @min-[300px]:block">
@@ -808,9 +1092,12 @@ export default function App() {
                       />
                       <Folder className="size-3.5 shrink-0" />
                       <MarqueeText className="flex-1">{folder}</MarqueeText>
-                      <span className="hidden shrink-0 text-[11px] text-muted-foreground/70 @min-[300px]:block">
+                      <Badge
+                        variant="secondary"
+                        className="hidden shrink-0 rounded-full px-1.5 py-0 text-[10px] font-normal tabular-nums @min-[300px]:inline-flex"
+                      >
                         {count}
-                      </span>
+                      </Badge>
                     </Button>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-44">
@@ -836,8 +1123,13 @@ export default function App() {
                               <Button
                                 variant="ghost"
                                 size="sm"
+                                draggable
+                                onDragStart={(e) => {
+                                  e.dataTransfer.setData(NOTE_MIME, n.path);
+                                  e.dataTransfer.effectAllowed = "copy";
+                                }}
                                 className={cn(
-                                  "sidebar-item h-8 w-full justify-start gap-2 px-2 text-left font-normal @max-[240px]:gap-1.5 @max-[240px]:px-1 @max-[240px]:has-[>svg]:px-1",
+                                  "sidebar-item relative h-8 w-full justify-start gap-2 px-2 text-left font-normal @max-[240px]:gap-1.5 @max-[240px]:px-1 @max-[240px]:has-[>svg]:px-1",
                                   w.notePath === n.path
                                     ? "bg-accent text-accent-foreground"
                                     : "text-foreground/80",
@@ -849,6 +1141,12 @@ export default function App() {
                                   })
                                 }
                               >
+                                {w.notePath === n.path && (
+                                  <span
+                                    aria-hidden
+                                    className="absolute top-1/2 left-0 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary"
+                                  />
+                                )}
                                 <FileText className="size-3.5 shrink-0 text-muted-foreground" />
                                 <MarqueeText className="flex-1">{n.title}</MarqueeText>
                                 <span className="hidden shrink-0 text-[11px] text-muted-foreground/70 @min-[300px]:block">
@@ -917,6 +1215,23 @@ export default function App() {
           )}
             </div>
           </ScrollArea>
+          {w.disk && (
+            <div className="flex items-center gap-2 border-t px-3 py-2 text-[11px] text-muted-foreground @max-[240px]:px-2">
+              <HardDrive className="size-3 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">
+                {w.disk.root.name}
+              </span>
+              {binding && (
+                <span
+                  aria-hidden
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    syncState.conflicts.length ? "bg-destructive" : "bg-emerald-500",
+                  )}
+                />
+              )}
+            </div>
+          )}
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent className="w-48">
@@ -1114,55 +1429,18 @@ export default function App() {
   const editorPane = (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       {w.project && tabs.length > 0 && (
-        <div
-          role="tablist"
-          aria-label="打开的文档"
-          className="tab-strip animate-in flex h-9 shrink-0 items-end gap-1 overflow-x-auto border-b bg-muted/40 px-2 pt-1 fade-in slide-in-from-top-1 duration-200"
-        >
-          {tabs.map((path) => {
-            const note = w.project?.notes.find((n) => n.path === path);
-            const label = note?.title ?? path.split("/").at(-1) ?? path;
-            const active = w.notePath === path;
-            return (
-              <div
-                key={path}
-                role="tab"
-                aria-selected={active}
-                tabIndex={active ? 0 : -1}
-                className={cn(
-                  "group tab animate-in flex h-8 max-w-[220px] shrink-0 items-center gap-1.5 rounded-t-md pr-1 pl-2.5 text-sm transition-colors fade-in slide-in-from-left-1 fill-mode-backwards duration-200",
-                  active
-                    ? "border-b-2 border-b-background bg-background font-medium text-foreground"
-                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-                )}
-              >
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-                  onClick={() => void act(() => w.openNote(path))}
-                >
-                  <FileText className="size-3.5 shrink-0 opacity-70" />
-                  <span className="truncate">{label}</span>
-                </button>
-                {active && w.dirty && (
-                  <span
-                    title="有未保存的修改"
-                    className="size-1.5 shrink-0 rounded-full bg-foreground"
-                  />
-                )}
-                <button
-                  type="button"
-                  aria-label={`关闭 ${label}`}
-                  className="flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                  onClick={() => closeTab(path)}
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            );
-          })}
-        </div>
+        <TabStrip
+          tabs={tabs}
+          notes={w.project.notes}
+          activePath={w.notePath}
+          dirty={w.dirty}
+          label="打开的文档"
+          paneId={0}
+          onSelect={(path) => void act(() => w.openNote(path))}
+          onCloseTab={closeTab}
+          onSplit={(path, quad) => openInPane(quad, path)}
+          onTabDrop={handleTabDrop(0)}
+        />
       )}
       {w.note ? (
         <>
@@ -1284,6 +1562,197 @@ export default function App() {
       )}
     </div>
   );
+  // 四分屏网格的拖放与呈现：任何块上悬停都按内容区整体四分判定落点，
+  // 中央画十字分隔线、悬停象限高亮；drop 落到哪块就在哪块打开。
+  const handleX = "w-2 cursor-col-resize bg-transparent after:w-px after:bg-border hover:after:w-0.5 hover:after:bg-accent-foreground/40 active:after:w-0.5 active:after:bg-accent-foreground/60";
+  const handleY = "h-2 cursor-row-resize bg-transparent after:h-px after:bg-border hover:after:h-0.5 hover:after:bg-accent-foreground/40 active:after:h-0.5 active:after:bg-accent-foreground/60";
+  const quadHighlight = [
+    "top-2 left-2 bottom-[calc(50%+4px)] right-[calc(50%+4px)]",
+    "top-2 right-2 bottom-[calc(50%+4px)] left-[calc(50%+4px)]",
+    "bottom-2 left-2 top-[calc(50%+4px)] right-[calc(50%+4px)]",
+    "bottom-2 right-2 top-[calc(50%+4px)] left-[calc(50%+4px)]",
+  ];
+  // 标签页跨块移动：目标块先打开（主区会激活标签），再从源块移除；
+  // 源块因此关空时自然收起，与 VS Code 的分组行为一致。
+  function removeFromSource(from: PaneId, path: string) {
+    if (from === 0) closeTab(path);
+    else closePaneTab(from, path);
+  }
+  function reorderTabsList(
+    list: string[],
+    path: string,
+    hoverIndex: number,
+    before: boolean,
+  ) {
+    const from = list.indexOf(path);
+    if (from === -1) return list;
+    let at = before ? hoverIndex : hoverIndex + 1;
+    if (from < at) at -= 1;
+    const next = list.filter((_, i) => i !== from);
+    next.splice(Math.max(0, Math.min(at, next.length)), 0, path);
+    return next;
+  }
+  function handleTabDrop(targetQuad: PaneId) {
+    return (
+      path: string,
+      fromPane: PaneId | null,
+      hoverIndex: number | null,
+      before: boolean,
+    ) => {
+      if (fromPane === null) {
+        // 来自侧栏：按目标块打开。
+        openInPane(targetQuad, path);
+        return;
+      }
+      if (fromPane === targetQuad) {
+        // 同一块的标签条内：按插入点重排。
+        if (hoverIndex === null) return;
+        if (targetQuad === 0)
+          setTabs((cur) => reorderTabsList(cur, path, hoverIndex, before));
+        else
+          setPanes((cur) => {
+            const pane = cur[targetQuad];
+            if (!pane) return cur;
+            return {
+              ...cur,
+              [targetQuad]: {
+                ...pane,
+                tabs: reorderTabsList(pane.tabs, path, hoverIndex, before),
+              },
+            };
+          });
+        return;
+      }
+      // 跨块：移动而不是复制，避免同一文档在两块同时编辑。
+      openInPane(targetQuad, path);
+      removeFromSource(fromPane, path);
+    };
+  }
+  function dragHandlers(quad: PaneId) {
+    return {
+      onDragOver: (e: ReactDragEvent) => {
+        if (!e.dataTransfer.types.includes(NOTE_MIME)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setDropActive(true);
+        setDropHint(dropQuadOf(e));
+      },
+      onDragLeave: (e: ReactDragEvent) => {
+        if (
+          e.relatedTarget instanceof Node &&
+          (e.currentTarget as HTMLElement).contains(e.relatedTarget)
+        )
+          return;
+        setDropActive(false);
+        setDropHint(null);
+      },
+      onDrop: (e: ReactDragEvent) => {
+        if (!e.dataTransfer.types.includes(NOTE_MIME)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const path = e.dataTransfer.getData(NOTE_MIME);
+        const src = e.dataTransfer.getData(TAB_SRC_MIME);
+        const fromPane = src === "" ? null : (Number(src) as PaneId);
+        const quad2 = dropQuadOf(e);
+        setDropActive(false);
+        setDropHint(null);
+        if (!path) return;
+        if (fromPane !== null && fromPane === quad2) return; // 放回原块，无操作
+        openInPane(quad2, path);
+        if (fromPane !== null) removeFromSource(fromPane, path);
+      },
+    };
+  }
+  function dropOverlay() {
+    return (
+      <div className="pointer-events-none absolute inset-0 z-30 bg-primary/5">
+        <div className="absolute top-3 bottom-3 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-primary/30" />
+        <div className="absolute left-3 right-3 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-primary/30" />
+        {dropHint !== null && (
+          <div
+            className={cn(
+              "absolute rounded-lg border-2 border-dashed border-primary/60 bg-primary/15",
+              quadHighlight[dropHint],
+            )}
+          />
+        )}
+      </div>
+    );
+  }
+  function paneArea(quad: PaneQuad) {
+    const pane = panes[quad];
+    if (!pane) return null;
+    return (
+      <div className="relative h-full min-h-0 min-w-0" {...dragHandlers(quad)}>
+        <SplitPane
+          disk={w.disk!}
+          projects={w.projects}
+          tabs={pane.tabs}
+          active={pane.active}
+          paneId={quad}
+          onSelect={(path) =>
+            setPanes((cur) =>
+              cur[quad] ? { ...cur, [quad]: { ...cur[quad]!, active: path } } : cur,
+            )
+          }
+          onCloseTab={(path) => closePaneTab(quad, path)}
+          onSplit={(path, target) => openInPane(target, path)}
+          onTabDrop={handleTabDrop(quad)}
+        />
+      </div>
+    );
+  }
+  const hasSplit = !!(panes[1] || panes[2] || panes[3]);
+  const mainArea = (
+    <div className="relative h-full min-h-0 min-w-0" {...dragHandlers(0)}>
+      {editorPane}
+      {dropActive && !hasSplit && dropOverlay()}
+    </div>
+  );
+  // 四块按列组装：左列 = 主区(0)+左下(2)，右列 = 右上(1)+右下(3)，
+  // 缺失块由同行/同列的邻居扩展，始终是一个规整的网格。
+  const gridArea = !hasSplit ? null : (
+    <ResizablePanel id="grid" minSize="300px" style={{ overflow: "hidden" }}>
+      <div className="relative h-full min-h-0 min-w-0">
+        <ResizablePanelGroup id="grid-cols" orientation="horizontal" className="h-full">
+          <ResizablePanel id="grid-left" minSize="240px" style={{ overflow: "hidden" }}>
+            <ResizablePanelGroup id="grid-left-rows" orientation="vertical" className="h-full">
+              <ResizablePanel id="editor" minSize="180px" style={{ overflow: "hidden" }}>
+                {mainArea}
+              </ResizablePanel>
+              {panes[2] && (
+                <>
+                  <ResizableHandle className={handleY} />
+                  <ResizablePanel id="pane-2" minSize="140px" style={{ overflow: "hidden" }}>
+                    {paneArea(2)}
+                  </ResizablePanel>
+                </>
+              )}
+            </ResizablePanelGroup>
+          </ResizablePanel>
+          {(panes[1] || panes[3]) && <ResizableHandle className={handleX} />}
+          {(panes[1] || panes[3]) && (
+            <ResizablePanel id="grid-right" minSize="240px" style={{ overflow: "hidden" }}>
+              <ResizablePanelGroup id="grid-right-rows" orientation="vertical" className="h-full">
+                {panes[1] && (
+                  <ResizablePanel id="pane-1" minSize="140px" style={{ overflow: "hidden" }}>
+                    {paneArea(1)}
+                  </ResizablePanel>
+                )}
+                {panes[1] && panes[3] && <ResizableHandle className={handleY} />}
+                {panes[3] && (
+                  <ResizablePanel id="pane-3" minSize="140px" style={{ overflow: "hidden" }}>
+                    {paneArea(3)}
+                  </ResizablePanel>
+                )}
+              </ResizablePanelGroup>
+            </ResizablePanel>
+          )}
+        </ResizablePanelGroup>
+        {dropActive && dropOverlay()}
+      </div>
+    </ResizablePanel>
+  );
   const modalTitle = {
     root: "新建知识库",
     project: "新建项目",
@@ -1298,7 +1767,13 @@ export default function App() {
   return (
     <>
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
-        <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b px-3">
+        <header
+          className={cn(
+            "flex h-12 shrink-0 items-center justify-between gap-4 border-b px-3",
+            isMacOverlayTitleBar && "pl-[92px]",
+          )}
+          data-tauri-drag-region={isMacOverlayTitleBar ? "deep" : undefined}
+        >
           <div className="flex min-w-0 items-center gap-1.5">
             {w.project ? (
               <>
@@ -1603,11 +2078,13 @@ export default function App() {
                 >
                   {tree}
                 </ResizablePanel>
-                <ResizableHandle className="w-2 cursor-col-resize bg-transparent after:w-px after:bg-border hover:after:w-0.5 hover:after:bg-accent-foreground/40 active:after:w-0.5 active:after:bg-accent-foreground/60" />
-                <ResizablePanel id="editor" minSize="350px">
-                  {editorPane}
-                </ResizablePanel>
-                <ResizableHandle className="w-2 cursor-col-resize bg-transparent after:w-px after:bg-border hover:after:w-0.5 hover:after:bg-accent-foreground/40 active:after:w-0.5 active:after:bg-accent-foreground/60" />
+                <ResizableHandle className={handleX} />
+                {gridArea ?? (
+                  <ResizablePanel id="editor" minSize="350px">
+                    {mainArea}
+                  </ResizablePanel>
+                )}
+                <ResizableHandle className={handleX} />
                 <ResizablePanel
                   id="aside"
                   panelRef={asideRef}
@@ -2333,33 +2810,39 @@ export default function App() {
       <CommandDialog
         open={command}
         onOpenChange={setCommand}
-        title="查找文档"
-        description="按名称打开本地项目文档。"
+        title="全库搜索"
+        description="跨项目搜索并打开知识库中的文档。"
       >
-        <CommandInput placeholder="输入文档名称…" />
+        <CommandInput placeholder="搜索全库文档…" />
         <CommandList>
           <CommandEmpty>没有找到相关文档。</CommandEmpty>
-          <CommandGroup heading={w.project?.name ?? "请先进入项目"}>
-            {w.project?.notes.map((note) => (
-              <CommandItem
-                key={note.path}
-                value={note.path}
-                onSelect={() =>
-                  void act(async () => {
-                    await w.openNote(note.path);
-                    setCommand(false);
-                    setMobileNav(false);
-                  })
-                }
-              >
-                <FileText />
-                {note.title}
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {note.folder}
-                </span>
-              </CommandItem>
-            ))}
-          </CommandGroup>
+          {!w.disk ? (
+            <CommandGroup heading="全库搜索">
+              <CommandItem disabled>请先打开知识库文件夹。</CommandItem>
+            </CommandGroup>
+          ) : (
+            w.projects.map((project) =>
+              project.notes.length ? (
+                <CommandGroup key={project.path} heading={project.name}>
+                  {project.notes.map((note) => (
+                    <CommandItem
+                      key={note.path}
+                      value={`${project.name} ${note.folder} ${note.title}`}
+                      onSelect={() =>
+                        void openFromLibrary(project, note)
+                      }
+                    >
+                      <FileText />
+                      <span className="flex-1 truncate">{note.title}</span>
+                      <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                        {note.folder}
+                      </span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              ) : null,
+            )
+          )}
         </CommandList>
       </CommandDialog>
       <CommandDialog

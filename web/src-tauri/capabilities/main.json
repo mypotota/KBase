@@ -1,11 +1,14 @@
 {
   "identifier": "main",
   "description": "Local KBase window access; filesystem commands are restricted to folders explicitly chosen by the user.",
-  "windows": ["main"],
+  "windows": ["main", "quick-capture"],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide",
     "core:window:allow-close",
     "core:window:allow-destroy",
+    "clipboard-manager:allow-read-text",
     "core:event:default"
   ]
 }

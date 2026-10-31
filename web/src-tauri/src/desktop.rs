@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Root {
@@ -147,9 +148,32 @@ async fn move_directory(
 ) -> Result<(), String> {
     files::move_directory(&root_path(&state, &root_id)?, &from, &to)
 }
+// Quick-capture window toggle, shared by the global hotkey handler.
+fn toggle_quick_capture(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("quick-capture") else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+    } else {
+        let _ = window.show();
+        let _ = window.center();
+        let _ = window.set_focus();
+    }
+}
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        toggle_quick_capture(app);
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             let folder = app.path().app_data_dir()?;
             fs::create_dir_all(&folder)?;
@@ -163,7 +187,30 @@ pub fn run() {
                 values: Mutex::new(values),
                 file,
             });
+            // The quick-capture hotkey must not block startup when the combo
+            // is taken by another app, so fall through to the next candidate.
+            let shortcuts = ["alt+space", "cmd+shift+k"];
+            let mut registered = false;
+            for combo in shortcuts {
+                match app.global_shortcut().register(combo) {
+                    Ok(_) => {
+                        registered = true;
+                        break;
+                    }
+                    Err(e) => eprintln!("快捷键 {combo} 注册失败: {e}"),
+                }
+            }
+            if !registered {
+                eprintln!("快速收集箱快捷键均注册失败，可在系统设置中释放后重启");
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "quick-capture" {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             known_roots,
