@@ -206,18 +206,20 @@ export default function SplitPane({
                   {saving ? "正在写入磁盘" : dirty ? "待保存" : "已保存到本地"}
                 </span>
               </div>
-              <MarkdownEditor
-                key={active}
-                value={text}
-                onChange={update}
-                readOnly={reading}
-                onReady={() => {}}
-                onSlash={() => {}}
-                resolveImage={(src) => imageUrl(disk, active, src)}
-                onImage={(file) =>
-                  saveImage(disk, active.split("/")[0], active, file)
-                }
-              />
+              <div key={active} className="doc-enter">
+                <MarkdownEditor
+                  key={active}
+                  value={text}
+                  onChange={update}
+                  readOnly={reading}
+                  onReady={() => {}}
+                  onSlash={() => {}}
+                  resolveImage={(src) => imageUrl(disk, active, src)}
+                  onImage={(file) =>
+                    saveImage(disk, active.split("/")[0], active, file)
+                  }
+                />
+              </div>
               <div className="mt-6 flex items-center justify-between text-xs text-muted-foreground">
                 <span>{reading ? "阅读模式" : "编辑模式"}</span>
                 <span>{text.replace(/\s/g, "").length} 字</span>
@@ -236,7 +238,7 @@ export default function SplitPane({
             {saving ? (
               <Loader2 className="size-3 shrink-0 animate-spin" />
             ) : dirty ? (
-              <span className="size-1.5 shrink-0 rounded-full bg-foreground" />
+              <span className="dirty-dot size-1.5 shrink-0 rounded-full bg-foreground" />
             ) : null}
             <span className="truncate">分屏 · {title}</span>
           </footer>

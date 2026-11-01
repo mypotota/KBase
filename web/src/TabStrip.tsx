@@ -58,6 +58,7 @@ export default function TabStrip({
   // 排序插入指示：dropAt 在 dragover 中无法读到拖拽数据（浏览器安全限制），
   // 只按光标位置计算插入点，path 留到 drop 时再取。
   const [dropAt, setDropAt] = useState<{ index: number; before: boolean } | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
   const dropAtRef = useRef<{ index: number; before: boolean } | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
 
@@ -149,19 +150,22 @@ export default function TabStrip({
                   e.dataTransfer.setData(NOTE_MIME, path);
                   e.dataTransfer.setData(TAB_SRC_MIME, String(paneId));
                   e.dataTransfer.effectAllowed = "move";
+                  setDragging(path);
                 }}
+                onDragEnd={() => setDragging(null)}
                 className={cn(
-                  "group tab animate-in relative flex h-8 max-w-[220px] shrink-0 cursor-default items-center gap-1.5 rounded-t-md pr-1 pl-2.5 text-sm transition-colors fade-in slide-in-from-left-1 fill-mode-backwards duration-200",
+                  "group tab animate-in relative flex h-8 max-w-[220px] shrink-0 cursor-default items-center gap-1.5 rounded-t-md pr-1 pl-2.5 text-sm fade-in slide-in-from-left-1 fill-mode-backwards duration-200",
                   active
                     ? "border-b-2 border-b-background bg-background font-medium text-foreground"
                     : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                  dragging === path && "is-dragging",
                 )}
               >
                 {onTabDrop && dropAt?.index === tabIndex && (
                   <span
                     aria-hidden
                     className={cn(
-                      "pointer-events-none absolute top-1 bottom-0.5 z-10 w-0.5 rounded-full bg-primary",
+                      "drop-indicator pointer-events-none absolute top-1 bottom-0.5 z-10 w-0.5 rounded-full bg-primary",
                       dropAt.before ? "-left-px" : "-right-px",
                     )}
                   />
@@ -178,7 +182,7 @@ export default function TabStrip({
                 {active && dirty && (
                   <span
                     title="有未保存的修改"
-                    className="size-1.5 shrink-0 rounded-full bg-foreground"
+                    className="dirty-dot size-1.5 shrink-0 rounded-full bg-foreground"
                   />
                 )}
                 <button

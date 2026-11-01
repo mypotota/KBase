@@ -9,6 +9,10 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "clipboard-manager:allow-read-text",
+    {
+      "identifier": "http:default",
+      "allow": [{ "url": "https://dav.jianguoyun.com/*" }]
+    },
     "core:event:default"
   ]
 }

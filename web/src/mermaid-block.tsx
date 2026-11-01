@@ -28,6 +28,9 @@ function loadMermaid(theme: "default" | "dark"): Promise<MermaidApi> {
       securityLevel: "strict",
       theme,
       themeVariables: { background: "transparent" },
+      // mermaid 默认在渲染失败时往页面插入一张全屏的错误大图；
+      // 这里关掉它，失败只走我们的 error 分支展示摘要。
+      suppressErrorRendering: true,
     });
     return mermaid;
   });
@@ -102,6 +105,9 @@ function MermaidBlockView({ node, editor, getPos }: NodeViewProps) {
       } catch (cause) {
         if (cancelled) return;
         setSvg(null);
+        // 保险：清理 mermaid 失败时遗留的临时错误节点。
+        document.getElementById(`d${id.current}`)?.remove();
+        document.getElementById(id.current)?.remove();
         setError(
           cause instanceof Error ? cause.message : "图表语法无法解析",
         );

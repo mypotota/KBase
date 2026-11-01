@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Cloud,
   CloudCheck,
+  CloudUpload,
   Code2,
   Download,
   FileText,
@@ -117,13 +118,39 @@ import {
   type Conflict,
   disconnectProject,
 } from "./core/sync";
+import { davTest } from "./core/webdav";
+import {
+  autoSyncAllWebdav,
+  clearWebdavAccount,
+  disconnectWebdav,
+  formatBytes,
+  listRemoteWebdavProjects,
+  loadLastAutoSync,
+  loadWebdavAccount,
+  loadWebdavBinding,
+  loadWebdavSettings,
+  restoreFromWebdav,
+  saveWebdavAccount,
+  saveWebdavSettings,
+  syncWebdav,
+  webdavSyncBusy,
+  defaultWebdavSettings,
+  type WebdavBinding,
+  type WebdavSettings,
+} from "./core/webdav-sync";
+type WebdavAccountLocal = {
+  server: string;
+  user: string;
+  appPassword: string;
+};
 import {
   loadLogs,
+  log,
   subscribeLogs,
   diagnosticLogs,
   type LogEntry,
 } from "./core/log";
-import { decode } from "./core/fs";
+import { decode, selectRoot } from "./core/fs";
 import { imageUrl, saveImage } from "./core/attachments";
 import { getRecord } from "./core/db";
 import {
@@ -372,7 +399,29 @@ export default function App() {
       binary: false,
     }),
     [merge, setMerge] = useState(""),
-    [externalMerge, setExternalMerge] = useState("");
+    [externalMerge, setExternalMerge] = useState(""),
+    // 坚果云 WebDAV：账号存本机 IndexedDB，表单只在未保存时展示。
+    [webdavAccount, setWebdavAccount] = useState<WebdavAccountLocal | null>(null),
+    [webdavForm, setWebdavForm] = useState({
+      server: "https://dav.jianguoyun.com/dav/",
+      user: "",
+      password: "",
+    }),
+    [webdavBinding, setWebdavBinding] = useState<WebdavBinding | null>(null),
+    [webdavProgress, setWebdavProgress] = useState(""),
+    [webdavSyncing, setWebdavSyncing] = useState(false),
+    [webdavSettings, setWebdavSettings] =
+      useState<WebdavSettings>(defaultWebdavSettings()),
+    [lastAutoSync, setLastAutoSync] = useState<number | null>(null),
+    // 初始化恢复：从坚果云拉取整个知识库到本地新文件夹。
+    [webdavRestoreOpen, setWebdavRestoreOpen] = useState(false),
+    [webdavRestoreStep, setWebdavRestoreStep] = useState<
+      "form" | "confirm" | "progress"
+    >("form"),
+    [webdavRestoreAccount, setWebdavRestoreAccount] =
+      useState<WebdavAccountLocal | null>(null),
+    [webdavRestoreProjects, setWebdavRestoreProjects] = useState<string[]>([]),
+    [webdavRestoreNote, setWebdavRestoreNote] = useState("");
   const sessions = useRef(new Map<string, Api>()),
     workspaceLatest = useRef(w),
     backgroundLatest = useRef<() => Promise<void>>(async () => {}),
@@ -454,6 +503,106 @@ export default function App() {
         .then((items) => setTrashItems(items ?? []))
         .catch(w.fail);
   }, [panel, w.disk]);
+  useEffect(() => {
+    if (panel !== "sync" || !w.disk) return;
+    loadWebdavAccount()
+      .then(setWebdavAccount)
+      .catch(() => {});
+  }, [panel, w.disk]);
+  // 坚果云绑定状态跟随项目变化：编辑器 footer 的同步指示依赖它。
+  useEffect(() => {
+    if (!w.disk || w.projectPath === null) {
+      setWebdavBinding(null);
+      return;
+    }
+    loadWebdavBinding(w.disk.root.id, w.projectPath)
+      .then(setWebdavBinding)
+      .catch(() => {});
+  }, [w.disk, w.projectPath]);
+  useEffect(() => {
+    if (panel !== "settings") return;
+    loadWebdavSettings()
+      .then(setWebdavSettings)
+      .catch(() => {});
+    loadLastAutoSync()
+      .then(setLastAutoSync)
+      .catch(() => {});
+  }, [panel]);
+  function updateWebdavSettings(patch: Partial<WebdavSettings>) {
+    setWebdavSettings((cur) => {
+      const next = { ...cur, ...patch };
+      void saveWebdavSettings(next);
+      return next;
+    });
+  }
+  // 定时自动同步：每 30 秒检查一次到期时间；到期则保存当前文档并遍历
+  // 所有已绑定项目。单个项目失败不影响其余；节流时间戳保证间隔生效。
+  useEffect(() => {
+    if (!webdavAccount) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void (async () => {
+        if (webdavSyncBusy() || working) return;
+        const settings = await loadWebdavSettings();
+        if (!settings.autoSync || !settings.intervalMin) return;
+        const last = await loadLastAutoSync();
+        if (last && Date.now() - last < settings.intervalMin * 60000) return;
+        const disk = workspaceLatest.current.disk;
+        if (!disk) return;
+        await saveLatest.current();
+        setWebdavSyncing(true);
+        try {
+          const summary = await autoSyncAllWebdav(disk, webdavAccount, settings);
+          setLastAutoSync(Date.now());
+          if (summary.projects)
+            toast.success(
+              `坚果云自动同步完成（${summary.projects} 个项目）` +
+                (summary.errors.length
+                  ? `，${summary.errors.length} 个失败`
+                  : ""),
+            );
+        } finally {
+          setWebdavSyncing(false);
+        }
+      })().catch((e) => {
+        log("ERROR", "sync", "自动同步调度失败", {
+          code: String(e).slice(0, 80),
+        });
+      });
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [webdavAccount]);
+  // 保存后延迟同步当前项目：文档写入磁盘 30 秒后触发，期间再次保存重新计时。
+  const webdavSaveTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!webdavAccount || !w.projectPath || !w.snapshot) return;
+    let cancelled = false;
+    loadWebdavSettings().then((settings) => {
+      if (cancelled || !settings.syncOnSave) return;
+      if (webdavSaveTimer.current) window.clearTimeout(webdavSaveTimer.current);
+      webdavSaveTimer.current = window.setTimeout(() => {
+        void (async () => {
+          if (webdavSyncBusy() || working) return;
+          const disk = workspaceLatest.current.disk;
+          if (!disk) return;
+          await saveLatest.current();
+          const summary = await syncWebdav(
+            disk,
+            workspaceLatest.current.projectPath!,
+            webdavAccount,
+            { attachments: settings.attachments },
+          );
+          if (summary.uploaded + summary.downloaded + summary.conflicts.length)
+            toast.success(
+              `坚果云已同步：上传 ${summary.uploaded} · 下载 ${summary.downloaded}`,
+            );
+        })().catch(() => {});
+      }, 30000);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [w.snapshot?.hash, webdavAccount, webdavSettings.syncOnSave]);
   useEffect(() => {
     setExternalMerge(w.external?.local ?? "");
   }, [w.external?.path]);
@@ -552,6 +701,151 @@ export default function App() {
   backgroundLatest.current = syncAll;
   // Panel toggles animate their flex share; the transition is enabled for the
   // duration of the toggle only, so dragging the separator stays instant.
+  async function connectWebdav() {
+    // 连接失败把原因持久显示在面板里（toast 一闪而过容易漏掉）。
+    setWebdavProgress("正在连接坚果云…");
+    let account: WebdavAccountLocal;
+    try {
+      account = {
+        server: webdavForm.server.trim() || "https://dav.jianguoyun.com/dav/",
+        user: webdavForm.user.trim(),
+        appPassword: webdavForm.password,
+      };
+      await davTest(account);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setWebdavProgress(`连接失败：${message}`);
+      log("ERROR", "sync", "坚果云连接失败", {
+        code: message.slice(0, 80),
+      });
+      return;
+    }
+    await act(async () => {
+      await saveWebdavAccount(account);
+      setWebdavAccount(account);
+      setWebdavForm((f) => ({ ...f, password: "" }));
+      setWebdavProgress("");
+      toast.success("坚果云连接成功，凭据已保存在本机");
+    });
+  }
+  async function runWebdavSync() {
+    await act(async () => {
+      if (!w.disk || w.projectPath === null || !webdavAccount) return;
+      setWebdavSyncing(true);
+      try {
+        const settings = await loadWebdavSettings();
+      let result: Awaited<ReturnType<typeof syncWebdav>>;
+      try {
+        result = await syncWebdav(w.disk, w.projectPath, webdavAccount, {
+          attachments: settings.attachments,
+          onProgress: setWebdavProgress,
+        });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setWebdavProgress(`同步失败：${message}`);
+        throw e;
+      }
+      setWebdavBinding(
+        await loadWebdavBinding(w.disk.root.id, w.projectPath),
+      );
+      setWebdavProgress("");
+      await w.refresh();
+      const traffic = formatBytes(result.uploadedBytes + result.downloadedBytes);
+      toast.success(
+        result.conflicts.length
+          ? `同步完成；${result.conflicts.length} 个冲突版本已备份到 .kbase/conflicts`
+          : `同步完成：上传 ${result.uploaded} · 下载 ${result.downloaded}${
+              result.removedRemote + result.removedLocal
+                ? ` · 清理删除 ${result.removedRemote + result.removedLocal}`
+                : ""
+            } · 流量 ${traffic}`,
+      );
+      } finally {
+        setWebdavSyncing(false);
+      }
+    });
+  }
+  async function unbindWebdav() {
+    await act(async () => {
+      if (!w.disk || w.projectPath === null) return;
+      await disconnectWebdav(w.disk.root.id, w.projectPath);
+      setWebdavBinding(null);
+      toast.success("已断开坚果云同步，远端文件保留");
+    });
+  }
+  // 初始化恢复：连接坚果云 → 列出云端项目 → 选本地文件夹 → 整库下载。
+  // 失败时清掉提示语并交由全局错误提示，不阻塞用户重试。
+  async function startWebdavRestore() {
+    setWebdavRestoreNote("连接坚果云…");
+    let account: WebdavAccountLocal;
+    try {
+      account = {
+        server: webdavForm.server.trim() || "https://dav.jianguoyun.com/dav/",
+        user: webdavForm.user.trim(),
+        appPassword: webdavForm.password,
+      };
+      await davTest(account);
+    } catch (e) {
+      setWebdavRestoreNote("");
+      w.fail(e);
+      return;
+    }
+    try {
+      const projects = await listRemoteWebdavProjects(account);
+      if (projects === null)
+        throw new Error(
+          "坚果云上还没有 KBase 目录（请先在其他设备完成过一次同步）",
+        );
+      if (!projects.length) throw new Error("坚果云的 KBase 目录是空的");
+      setWebdavRestoreAccount(account);
+      setWebdavRestoreProjects(projects);
+      setWebdavRestoreNote("");
+      setWebdavRestoreStep("confirm");
+    } catch (e) {
+      setWebdavRestoreNote("");
+      w.fail(e);
+    }
+  }
+  async function confirmWebdavRestore() {
+    await act(async () => {
+      if (!webdavRestoreAccount) return;
+      setWebdavRestoreStep("progress");
+      setWebdavRestoreNote("请在弹出的窗口中选择本地文件夹…");
+      // showDirectoryPicker 需要用户手势，这里在点击的同步调用栈内打开。
+      const disk = await selectRoot();
+      if (!disk) {
+        setWebdavRestoreStep("confirm");
+        setWebdavRestoreNote("");
+        return;
+      }
+      setWebdavRestoreNote("正在恢复，请稍候…");
+      const summary = await restoreFromWebdav(
+        disk,
+        webdavRestoreAccount,
+        setWebdavRestoreNote,
+      );
+      await saveWebdavAccount(webdavRestoreAccount);
+      setWebdavAccount(webdavRestoreAccount);
+      setWebdavRestoreOpen(false);
+      setWebdavRestoreStep("form");
+      await w.reopen(disk.root);
+      toast.success(
+        `已从坚果云恢复 ${summary.projects.length} 个项目（${summary.files} 个文件，${formatBytes(summary.bytes)}）`,
+      );
+    });
+  }
+  async function removeWebdavAccountLocal() {
+    await act(async () => {
+      await clearWebdavAccount();
+      setWebdavAccount(null);
+      setWebdavForm({
+        server: "https://dav.jianguoyun.com/dav/",
+        user: "",
+        password: "",
+      });
+      toast.success("已删除本机保存的坚果云账号");
+    });
+  }
   function animatePanels(change: () => void) {
     setPanelsAnimating(true);
     if (animTimer.current !== null) window.clearTimeout(animTimer.current);
@@ -1000,10 +1294,7 @@ export default function App() {
                     }
                   >
                     {w.notePath === n.path && (
-                      <span
-                        aria-hidden
-                        className="absolute top-1/2 left-0 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary"
-                      />
+                      <span aria-hidden className="sidebar-active-bar" />
                     )}
                     <FileText className="size-3.5 shrink-0 text-muted-foreground" />
                     <MarqueeText className="flex-1">{n.title}</MarqueeText>
@@ -1142,10 +1433,7 @@ export default function App() {
                                 }
                               >
                                 {w.notePath === n.path && (
-                                  <span
-                                    aria-hidden
-                                    className="absolute top-1/2 left-0 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary"
-                                  />
+                                  <span aria-hidden className="sidebar-active-bar" />
                                 )}
                                 <FileText className="size-3.5 shrink-0 text-muted-foreground" />
                                 <MarqueeText className="flex-1">{n.title}</MarqueeText>
@@ -1487,18 +1775,20 @@ export default function App() {
                   {w.error}
                 </p>
               )}
-              <MarkdownEditor
-                key={w.notePath}
-                value={w.text}
-                onChange={w.updateText}
-                readOnly={read}
-                onReady={setEditor}
-                onSlash={() => setSlash(true)}
-                resolveImage={(src) => imageUrl(w.disk!, w.notePath!, src)}
-                onImage={(file) =>
-                  saveImage(w.disk!, w.projectPath!, w.notePath!, file)
-                }
-              />
+              <div key={w.notePath} className="doc-enter">
+                <MarkdownEditor
+                  key={w.notePath}
+                  value={w.text}
+                  onChange={w.updateText}
+                  readOnly={read}
+                  onReady={setEditor}
+                  onSlash={() => setSlash(true)}
+                  resolveImage={(src) => imageUrl(w.disk!, w.notePath!, src)}
+                  onImage={(file) =>
+                    saveImage(w.disk!, w.projectPath!, w.notePath!, file)
+                  }
+                />
+              </div>
               <div className="mt-6 flex items-center justify-between text-xs text-muted-foreground">
                 <span>{read ? "阅读模式" : "输入 / 插入内容"}</span>
                 <span>{w.text.replace(/\s/g, "").length} 字</span>
@@ -1510,7 +1800,7 @@ export default function App() {
               {w.saving ? (
                 <Loader2 className="size-3 shrink-0 animate-spin" />
               ) : w.dirty ? (
-                <span className="size-1.5 shrink-0 rounded-full bg-foreground" />
+                <span className="dirty-dot size-1.5 shrink-0 rounded-full bg-foreground" />
               ) : (
                 <Check className="size-3 shrink-0" />
               )}
@@ -1522,31 +1812,37 @@ export default function App() {
               onClick={() => setPanel("sync")}
               className="flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-hidden focus-visible:ring-[3px] focus-visible:ring-ring/50"
             >
-              {syncing ? (
+              {syncing || webdavSyncing ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : syncState.conflicts.length ? (
                 <TriangleAlert className="size-3.5 text-destructive" />
               ) : binding ? (
                 <CloudCheck className="size-3.5" />
+              ) : webdavBinding ? (
+                <CloudCheck className="size-3.5" />
               ) : (
                 <Cloud className="size-3.5" />
               )}
               <span aria-live="polite">
-                {syncing
-                  ? "同步中"
+                {syncing || webdavSyncing
+                  ? "坚果云同步中"
                   : syncState.conflicts.length
                     ? `${syncState.conflicts.length} 个冲突`
                     : binding
                       ? syncState.lastSync
                         ? `已同步 · ${new Date(syncState.lastSync).toLocaleTimeString()}`
                         : "已连接"
-                      : "未连接同步"}
+                      : webdavBinding
+                        ? webdavBinding.lastSync
+                          ? `坚果云已同步 · ${new Date(webdavBinding.lastSync).toLocaleTimeString()}`
+                          : "坚果云已连接"
+                        : "未连接同步"}
               </span>
             </button>
           </footer>
         </>
       ) : (
-        <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+        <div className="empty-enter flex h-full flex-col items-center justify-center p-8 text-center">
           <FileText className="mb-4 size-9 text-muted-foreground/60" />
           <h2 className="text-lg font-semibold tracking-tight">
             从第一篇文档开始
@@ -1665,17 +1961,17 @@ export default function App() {
   }
   function dropOverlay() {
     return (
-      <div className="pointer-events-none absolute inset-0 z-30 bg-primary/5">
-        <div className="absolute top-3 bottom-3 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-primary/30" />
-        <div className="absolute left-3 right-3 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-primary/30" />
-        {dropHint !== null && (
-          <div
-            className={cn(
-              "absolute rounded-lg border-2 border-dashed border-primary/60 bg-primary/15",
-              quadHighlight[dropHint],
-            )}
-          />
-        )}
+      <div className="fade-overlay pointer-events-none absolute inset-0 z-30 bg-primary/5">
+        <div className="quad-cross quad-cross-v" />
+        <div className="quad-cross quad-cross-h" />
+        {/* 高亮框常驻渲染，切换象限时在 inset 间平滑滑动 */}
+        <div
+          className={cn(
+            "quad-box",
+            dropHint === null ? "scale-95 opacity-0" : "opacity-100",
+            dropHint !== null && quadHighlight[dropHint],
+          )}
+        />
       </div>
     );
   }
@@ -1683,7 +1979,10 @@ export default function App() {
     const pane = panes[quad];
     if (!pane) return null;
     return (
-      <div className="relative h-full min-h-0 min-w-0" {...dragHandlers(quad)}>
+      <div
+        className="pane-enter relative h-full min-h-0 min-w-0"
+        {...dragHandlers(quad)}
+      >
         <SplitPane
           disk={w.disk!}
           projects={w.projects}
@@ -1913,6 +2212,27 @@ export default function App() {
                   </span>
                   <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                 </Button>
+                <Button
+                  variant="outline"
+                  className="h-auto w-full justify-start gap-3 px-4 py-3"
+                  disabled={working || w.busy}
+                  onClick={() => {
+                    setWebdavRestoreStep("form");
+                    setWebdavRestoreNote("");
+                    setWebdavRestoreOpen(true);
+                  }}
+                >
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                    <CloudUpload className="size-4 text-muted-foreground" />
+                  </span>
+                  <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+                    <span className="text-sm font-medium">从坚果云恢复</span>
+                    <span className="text-xs font-normal text-muted-foreground">
+                      登录坚果云，下载已同步的知识库
+                    </span>
+                  </span>
+                  <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                </Button>
               </div>
               {w.roots.length > 0 && (
                 <div className="mt-6 flex flex-col gap-1 text-left">
@@ -1999,7 +2319,7 @@ export default function App() {
                     .map((p, index) => (
                       <Button
                         variant="outline"
-                        className="group h-auto w-full animate-in flex-col items-start gap-3 rounded-lg p-4 text-left font-normal shadow-xs fade-in slide-in-from-bottom-2 fill-mode-backwards duration-300 hover:-translate-y-0.5 hover:bg-card hover:text-foreground hover:shadow-md active:translate-y-0 active:shadow-xs dark:bg-card dark:hover:bg-card"
+                        className="group h-auto w-full animate-in flex-col items-start gap-3 rounded-lg p-4 text-left font-normal shadow-xs transition-all duration-200 fade-in slide-in-from-bottom-2 fill-mode-backwards duration-300 hover:-translate-y-0.5 hover:bg-card hover:text-foreground hover:shadow-md active:translate-y-0 active:shadow-xs dark:bg-card dark:hover:bg-card"
                         style={{
                           animationDelay: `${Math.min(index, 12) * 40}ms`,
                         }}
@@ -2292,6 +2612,124 @@ export default function App() {
                           )}
                         </>
                       )}
+                      <Separator className="my-2" />
+                      <div className="flex flex-col gap-2.5 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <CloudUpload className="size-4 text-muted-foreground" />
+                          <label className="text-sm font-medium">
+                            坚果云同步
+                          </label>
+                        </div>
+                        {!webdavAccount ? (
+                          <>
+                            <p className="text-xs leading-relaxed text-muted-foreground">
+                              通过 WebDAV
+                              把整个项目同步到坚果云。应用密码在坚果云「账户信息 →
+                              安全选项」里生成，只保存在本机。
+                            </p>
+                            <Input
+                              aria-label="WebDAV 服务器地址"
+                              value={webdavForm.server}
+                              onChange={(e) =>
+                                setWebdavForm((f) => ({
+                                  ...f,
+                                  server: e.target.value,
+                                }))
+                              }
+                            />
+                            <Input
+                              aria-label="坚果云账号"
+                              placeholder="账号邮箱"
+                              autoComplete="username"
+                              value={webdavForm.user}
+                              onChange={(e) =>
+                                setWebdavForm((f) => ({
+                                  ...f,
+                                  user: e.target.value,
+                                }))
+                              }
+                            />
+                            <Input
+                              aria-label="坚果云应用密码"
+                              type="password"
+                              placeholder="应用密码（不是登录密码）"
+                              autoComplete="new-password"
+                              value={webdavForm.password}
+                              onChange={(e) =>
+                                setWebdavForm((f) => ({
+                                  ...f,
+                                  password: e.target.value,
+                                }))
+                              }
+                            />
+                            <Button
+                              size="sm"
+                              className="self-start"
+                              disabled={
+                                working || !webdavForm.user || !webdavForm.password
+                              }
+                              onClick={() => void connectWebdav()}
+                            >
+                              {working ? (
+                                <Loader2 className="animate-spin" />
+                              ) : (
+                                <CloudCheck />
+                              )}
+                              保存并测试连接
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-xs text-muted-foreground">
+                              已连接 {webdavAccount.server} · {webdavAccount.user}
+                            </p>
+                            {webdavBinding && (
+                              <p className="text-xs leading-relaxed break-all text-muted-foreground">
+                                远端目录 {webdavBinding.dir}
+                                {webdavBinding.lastSync
+                                  ? ` · 上次同步 ${new Date(webdavBinding.lastSync).toLocaleString()}`
+                                  : " · 首次同步会把整个项目上传"}
+                              </p>
+                            )}
+                            {webdavProgress && (
+                              <p className="text-xs break-all text-muted-foreground">
+                                {webdavProgress}
+                              </p>
+                            )}
+                            <Button
+                              size="sm"
+                              className="self-start"
+                              disabled={working || !w.project}
+                              onClick={() => void runWebdavSync()}
+                            >
+                              {working ? (
+                                <Loader2 className="animate-spin" />
+                              ) : (
+                                <CloudUpload />
+                              )}
+                              立即同步
+                            </Button>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={working}
+                                onClick={() => void unbindWebdav()}
+                              >
+                                断开此项目
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={working}
+                                onClick={() => void removeWebdavAccountLocal()}
+                              >
+                                删除本机账号
+                              </Button>
+                            </div>
+                          </>
+                        )}
+                      </div>
                       {syncError && (
                         <p
                           role="alert"
@@ -2361,6 +2799,80 @@ export default function App() {
                       <Cloud />
                       {syncing ? "同步中" : "管理同步"}
                     </Button>
+                  </div>
+                  <Separator className="my-2" />
+                  <div className="flex flex-col gap-3 py-3">
+                    <label className="text-sm font-medium">坚果云自动同步</label>
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-sm">定时同步</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          到期后自动检查所有已绑定项目
+                          {lastAutoSync
+                            ? ` · 上次 ${new Date(lastAutoSync).toLocaleTimeString()}`
+                            : ""}
+                        </p>
+                      </div>
+                      <Switch
+                        aria-label="定时自动同步"
+                        checked={webdavSettings.autoSync}
+                        onCheckedChange={(v) =>
+                          updateWebdavSettings({ autoSync: v })
+                        }
+                      />
+                    </div>
+                    {webdavSettings.autoSync && (
+                      <Select
+                        value={String(webdavSettings.intervalMin)}
+                        onValueChange={(v) =>
+                          updateWebdavSettings({ intervalMin: Number(v) })
+                        }
+                      >
+                        <SelectTrigger
+                          className="w-full"
+                          aria-label="自动同步间隔"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="5">每 5 分钟</SelectItem>
+                          <SelectItem value="15">每 15 分钟</SelectItem>
+                          <SelectItem value="30">每 30 分钟</SelectItem>
+                          <SelectItem value="60">每 60 分钟</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-sm">保存后延迟同步</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          文档写入磁盘 30 秒后自动同步当前项目
+                        </p>
+                      </div>
+                      <Switch
+                        aria-label="保存后延迟同步"
+                        checked={webdavSettings.syncOnSave}
+                        onCheckedChange={(v) =>
+                          updateWebdavSettings({ syncOnSave: v })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-sm">同步附件</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          关闭后仅同步 Markdown
+                          文本，图片等附件留在本地，显著减少流量
+                        </p>
+                      </div>
+                      <Switch
+                        aria-label="同步附件"
+                        checked={webdavSettings.attachments}
+                        onCheckedChange={(v) =>
+                          updateWebdavSettings({ attachments: v })
+                        }
+                      />
+                    </div>
                   </div>
                   <Separator className="my-2" />
                   <div className="flex items-center justify-between gap-4 py-3">
@@ -2805,6 +3317,106 @@ export default function App() {
               </Button>
             )}
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={webdavRestoreOpen}
+        onOpenChange={(open) => {
+          if (!open) setWebdavRestoreOpen(false);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>从坚果云恢复</DialogTitle>
+            <DialogDescription>
+              {webdavRestoreStep === "form"
+                ? "输入坚果云账号与应用密码，测试连接后列出云端项目。"
+                : webdavRestoreStep === "confirm"
+                  ? `云端共有 ${webdavRestoreProjects.length} 个项目：${webdavRestoreProjects.join("、")}。选择一个本地文件夹，它们将被完整下载并建立同步基线。`
+                  : "正在恢复，请勿关闭窗口。"}
+            </DialogDescription>
+          </DialogHeader>
+          {webdavRestoreStep === "form" ? (
+            <div className="flex flex-col gap-4">
+              <Input
+                aria-label="WebDAV 服务器地址"
+                value={webdavForm.server}
+                onChange={(e) =>
+                  setWebdavForm((f) => ({ ...f, server: e.target.value }))
+                }
+              />
+              <Input
+                aria-label="坚果云账号"
+                placeholder="账号邮箱"
+                autoComplete="username"
+                value={webdavForm.user}
+                onChange={(e) =>
+                  setWebdavForm((f) => ({ ...f, user: e.target.value }))
+                }
+              />
+              <Input
+                aria-label="坚果云应用密码"
+                type="password"
+                placeholder="应用密码（不是登录密码）"
+                autoComplete="new-password"
+                value={webdavForm.password}
+                onChange={(e) =>
+                  setWebdavForm((f) => ({ ...f, password: e.target.value }))
+                }
+              />
+              {webdavRestoreNote && (
+                <p className="text-xs text-muted-foreground">
+                  {webdavRestoreNote}
+                </p>
+              )}
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setWebdavRestoreOpen(false)}
+                >
+                  取消
+                </Button>
+                <Button
+                  disabled={working || !webdavForm.user || !webdavForm.password}
+                  onClick={() => void startWebdavRestore()}
+                >
+                  {working ? <Loader2 className="animate-spin" /> : <CloudCheck />}
+                  测试并连接
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : webdavRestoreStep === "confirm" ? (
+            <div className="flex flex-col gap-4">
+              <ul className="max-h-40 space-y-1 overflow-y-auto rounded-md border p-2 text-sm">
+                {webdavRestoreProjects.map((project) => (
+                  <li key={project} className="flex items-center gap-2">
+                    <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+                    {project}
+                  </li>
+                ))}
+              </ul>
+              {webdavRestoreNote && (
+                <p className="text-xs text-muted-foreground">
+                  {webdavRestoreNote}
+                </p>
+              )}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setWebdavRestoreStep("form")}>
+                  上一步
+                </Button>
+                <Button disabled={working} onClick={() => void confirmWebdavRestore()}>
+                  选择文件夹并恢复
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-3 py-6">
+              <Loader2 className="size-6 animate-spin text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">
+                {webdavRestoreNote || "恢复中…"}
+              </p>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
       <CommandDialog

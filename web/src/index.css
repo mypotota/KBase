@@ -472,3 +472,170 @@
   color: #ffa198;
   background: rgb(248 81 73 / 0.15);
 }
+
+/*
+ * Motion system. One soft ease-out for movement, one spring with a tiny
+ * overshoot for things that "pop in" (indicators, badges). Durations stay
+ * short: 120-200ms for micro feedback, 240-320ms for view transitions.
+ * prefers-reduced-motion disables everything (see the block above).
+ */
+:root {
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+
+/* Buttons compress slightly while pressed, like macOS controls. */
+[data-slot="button"]:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+/* Switching documents fades the editor body in from a few pixels below. */
+.doc-enter {
+  animation: doc-enter 280ms var(--ease-soft) backwards;
+}
+@keyframes doc-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.empty-enter {
+  animation: doc-enter 320ms var(--ease-soft) backwards;
+}
+
+/* A freshly created split pane settles into place. */
+.pane-enter {
+  animation: pane-enter 300ms var(--ease-soft) backwards;
+}
+@keyframes pane-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.988);
+  }
+}
+
+/* The unsaved-changes dot breathes instead of blinking. */
+.dirty-dot {
+  animation: dirty-pulse 1.8s ease-in-out infinite;
+}
+@keyframes dirty-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* The active-document indicator pops out of the row edge. The centering
+ * transform lives in the static rule — keyframes only animate the scale —
+ * otherwise the bar drops half a height when the animation ends. */
+.sidebar-active-bar {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 1rem;
+  width: 3px;
+  border-radius: 9999px;
+  background: var(--primary);
+  transform: translateY(-50%);
+  animation: bar-in 200ms var(--ease-spring) backwards;
+}
+@keyframes bar-in {
+  from {
+    transform: translateY(-50%) scaleY(0.2);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(-50%) scaleY(1);
+    opacity: 1;
+  }
+}
+
+/*
+ * Tab dragging: the lifted tab floats above its neighbours while the drop
+ * indicator snaps into place.
+ */
+.tab {
+  transition:
+    opacity 150ms var(--ease-soft),
+    transform 150ms var(--ease-soft),
+    background-color 150ms var(--ease-soft),
+    color 150ms var(--ease-soft);
+}
+.tab.is-dragging {
+  opacity: 0.45;
+  transform: scale(1.02);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.16);
+  z-index: 5;
+}
+.drop-indicator {
+  animation: indicator-in 160ms var(--ease-spring) backwards;
+  transform-origin: top;
+}
+@keyframes indicator-in {
+  from {
+    transform: scaleY(0);
+  }
+}
+
+/*
+ * The four-way drop overlay: a cross fades open from the centre, and the
+ * quadrant highlight glides between quadrants while the pointer moves.
+ */
+.quad-cross {
+  position: absolute;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--primary) 30%, transparent);
+}
+.quad-cross-v {
+  left: 50%;
+  top: 0.75rem;
+  bottom: 0.75rem;
+  width: 2px;
+  margin-left: -1px;
+  transform-origin: center;
+  animation: quad-cross-y 240ms var(--ease-soft) backwards;
+}
+.quad-cross-h {
+  top: 50%;
+  left: 0.75rem;
+  right: 0.75rem;
+  height: 2px;
+  margin-top: -1px;
+  transform-origin: center;
+  animation: quad-cross-x 240ms var(--ease-soft) backwards;
+}
+@keyframes quad-cross-y {
+  from {
+    transform: scaleY(0);
+  }
+}
+@keyframes quad-cross-x {
+  from {
+    transform: scaleX(0);
+  }
+}
+.quad-box {
+  position: absolute;
+  border-radius: var(--radius-lg);
+  border: 2px dashed color-mix(in oklab, var(--primary) 60%, transparent);
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  transition:
+    top 200ms var(--ease-soft),
+    right 200ms var(--ease-soft),
+    bottom 200ms var(--ease-soft),
+    left 200ms var(--ease-soft),
+    opacity 160ms var(--ease-soft),
+    scale 200ms var(--ease-soft);
+}
+.fade-overlay {
+  animation: overlay-in 160ms var(--ease-soft) backwards;
+}
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+}
+
