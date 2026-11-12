@@ -26,6 +26,7 @@ test("Local Markdown files remain directly accessible and external edits are pre
   await p.getByLabel("名称", { exact: true }).fill("Agent 项目");
   await p.getByRole("button", { name: "确认", exact: true }).click();
   await p.getByRole("button", { name: /Agent 项目.*Markdown/ }).click();
+  await p.getByRole("button", { name: "资料工作区", exact: true }).click();
   await p.getByRole("button", { name: "新建文档", exact: true }).last().click();
   await p.getByLabel("名称", { exact: true }).fill("本地笔记");
   await p.getByRole("textbox", { name: "子文件夹（可选）" }).fill("资料/草稿");
@@ -120,7 +121,8 @@ test("Local Markdown files remain directly accessible and external edits are pre
   await p.getByRole("button", { name: "返回项目", exact: true }).click();
   await p.reload();
   await p.getByRole("button", { name: "真实知识库", exact: true }).click();
-  await p.getByRole("button", { name: /Agent 项目.*Markdown/ }).click();
+  // 已保存的会话自动恢复工程，无需再次点击短暂出现的工程卡片。
+  await p.getByRole("button", { name: "资料工作区", exact: true }).click();
   await p.waitForTimeout(400);
   assert.equal(await diskText(), "# 安全合并\n\n本机和 Agent 的修改都保留。");
   console.log("reopen persisted folder passed");

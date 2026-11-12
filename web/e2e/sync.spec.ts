@@ -23,6 +23,7 @@ test("Authenticated project sync preserves multi-device conflicts", async ({
   await p.getByLabel("名称", { exact: true }).fill("同步项目");
   await p.getByRole("button", { name: "确认", exact: true }).click();
   await p.getByRole("button", { name: /同步项目.*Markdown/ }).click();
+  await p.getByRole("button", { name: "资料工作区", exact: true }).click();
   await p.getByRole("button", { name: "新建文档", exact: true }).last().click();
   await p.getByLabel("名称", { exact: true }).fill("同步笔记");
   await p.getByRole("button", { name: "确认", exact: true }).click();

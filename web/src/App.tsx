@@ -105,6 +105,7 @@ import { splitFrontmatter } from "./core/markdown";
 import { frontmatterText, parseFrontmatter } from "./lib/frontmatter";
 import { useWorkspace } from "./core/use-workspace";
 import MarkdownEditor from "./MarkdownEditor";
+import EngineeringOverview from "./EngineeringOverview";
 import { MarqueeText } from "./marquee-text";
 import { Api, serviceUrl } from "./core/api";
 import {
@@ -310,8 +311,11 @@ type Modal =
   | "delete-project"
   | null;
 export default function App() {
+  const [engineeringView, setEngineeringView] = useState<string | null>(null);
   const w = useWorkspace(),
     { resolvedTheme, setTheme } = useAppearance();
+  const engineeringKey = w.disk && w.project ? `${w.disk.root.id}:${w.project.path}` : null;
+  const showEngineering = !!w.project && !w.project.virtual && engineeringView !== engineeringKey;
   const [panel, setPanel] = useState<Panel>(null),
     [modal, setModal] = useState<Modal>(null),
     [name, setName] = useState(""),
@@ -2144,6 +2148,10 @@ export default function App() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
+            {w.project && !w.project.virtual && <>
+              <Button size="sm" variant={showEngineering ? "secondary" : "ghost"} onClick={() => void act(async () => { await w.saveNow(); setEngineeringView(null); })}>工程概览</Button>
+              <Button size="sm" variant={!showEngineering ? "secondary" : "ghost"} onClick={() => setEngineeringView(engineeringKey)}>资料工作区</Button>
+            </>}
             <Button
               variant="ghost"
               size="icon-sm"
@@ -2279,7 +2287,7 @@ export default function App() {
                   项目
                 </h1>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  真实文件夹，整理每一个方向。
+                  以工程为入口，连接目标、下一步与交付资料。
                 </p>
               </div>
               <Button
@@ -2372,6 +2380,8 @@ export default function App() {
               </div>
             )}
           </main>
+        ) : showEngineering ? (
+          <EngineeringOverview key={engineeringKey} disk={w.disk} project={w.project} refresh={() => w.refresh()} fail={w.fail} open={async path => { await w.openNote(path); setEngineeringView(engineeringKey); }} />
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden">
             {small ? (
